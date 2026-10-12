@@ -1,6 +1,7 @@
 import {
   createContext,
   useContext,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -20,6 +21,7 @@ import {
   DialogDescription,
 } from "../../components/ui/dialog";
 interface CloudContextValue {
+  flush: () => Promise<void>;
   open: () => void;
   state: SyncState;
   authenticated: boolean;
@@ -151,6 +153,14 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     engine.current?.changed();
   }, [rawAppData]);
+  const flush = useCallback(async () => {
+    // React must publish Save's state change to dataRef before capturing the upload.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    const current = engine.current;
+    if (!current)
+      throw new Error("Đăng nhập để đồng bộ đầy đủ các bảng lên cloud.");
+    await current.flush();
+  }, []);
   const owned = localStorage.getItem(OWNER_KEY);
   const gated =
     !authReady || (!!user && unlockedOwner !== user.id) || (!!owned && !user);
@@ -185,7 +195,12 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
   };
   return (
     <Context.Provider
-      value={{ open: () => setDialogOpen(true), state, authenticated: !!user }}
+      value={{
+        flush,
+        open: () => setDialogOpen(true),
+        state,
+        authenticated: !!user,
+      }}
     >
       {gated ? (
         <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">

@@ -28,6 +28,8 @@ export class SyncEngine {
   private refs: Record<string, unknown> = {};
   private dirty = new Set<string>();
   private running = false;
+  private syncTask: Promise<void> | null = null;
+  private lastError: unknown = null;
   private stopped = false;
   private ready = false;
   private applying = false;
@@ -164,6 +166,7 @@ export class SyncEngine {
     }
   }
   private fail(error: unknown) {
+    this.lastError = error;
     if (this.stopped) return;
     this.report({
       status: navigator.onLine ? "error" : "offline",
@@ -176,10 +179,46 @@ export class SyncEngine {
             ),
     });
   }
-  async sync() {
+  /** Explicit Save waits for the active upload and any newer local changes. */
+  async flush() {
+    this.changed();
+    if (!this.ready) await this.retry();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await this.sync();
+      if (this.stopped)
+        throw new Error(
+          "Phiên đồng bộ đã đóng. Dữ liệu trên máy vẫn được giữ.",
+        );
+      if (this.conflictRemote)
+        throw new Error(
+          "Có xung đột dữ liệu giữa các máy. Chọn bản cần giữ trước khi xác nhận lưu cloud.",
+        );
+      if (this.lastError)
+        throw new Error(
+          (this.lastError as { message?: string })?.message ||
+            "Chưa lưu được dữ liệu lên cloud.",
+        );
+      if (this.ready && this.dirty.size === 0) return;
+    }
+    throw new Error(
+      "Dữ liệu vẫn đang thay đổi. Chờ đồng bộ hoàn tất rồi lưu lại.",
+    );
+  }
+  sync(): Promise<void> {
+    if (this.syncTask) return this.syncTask;
+    if (!this.ready || this.stopped || this.conflictRemote)
+      return Promise.resolve();
+    const task = this.runSync();
+    this.syncTask = task;
+    return task.finally(() => {
+      if (this.syncTask === task) this.syncTask = null;
+    });
+  }
+  private async runSync() {
     if (!this.ready || this.running || this.stopped || this.conflictRemote)
       return;
     this.running = true;
+    this.lastError = null;
     try {
       let remote = await this.repository.read();
       if (this.stopped) return;

@@ -20,7 +20,9 @@ export interface ReconciliationTotals {
 type ReconciliationSource = Pick<
   AppData,
   "Sheet1_AE" | "Hold_AE" | "Bank_North_AE"
-> & { globalMonth?: string };
+> & { globalMonth?: string } & Partial<Pick<
+  AppData, "BankExport" | "TransactionActivity" | "TransactionMonthCache"
+>>;
 
 function readFirst(row: any, keys: string[]): unknown {
   for (const key of keys) {
@@ -101,6 +103,73 @@ export function getDeductionContribution(row: any, reportMonth: string): number 
   return getDeductionReportEntry(row, reportMonth)?.contribution ?? 0;
 }
 
+/** Confirmed Batch Payment is authoritative, including retained historical months. */
+export function getReconciliationActualSource(
+  appData: ReconciliationSource,
+  reportMonth: string,
+) {
+  const target = parseMonthPeriod(reportMonth);
+  const active = parseMonthPeriod(
+    appData.TransactionMonthCache?.activePeriod ||
+      appData.globalMonth ||
+      reportMonth,
+  );
+  if (
+    target &&
+    active?.key === target.key &&
+    appData.TransactionActivity?.lastAction === "saved" &&
+    appData.BankExport
+  ) {
+    return { rows: appData.BankExport.data, confirmed: true };
+  }
+  const cached = target
+    ? appData.TransactionMonthCache?.months[target.key]
+    : undefined;
+  if (cached?.activity?.lastAction === "saved")
+    return { rows: cached.table.data, confirmed: true };
+  return { rows: appData.Bank_North_AE?.data || [], confirmed: false };
+}
+
+function sumReconciliationActual(
+  source: ReturnType<typeof getReconciliationActualSource>,
+  reportMonth: string,
+): number {
+  return source.rows.reduce((sum: number, row: any) => {
+    if (row?._isSubtotal || row?._isTotalRow) return sum;
+    const matches = source.confirmed
+      ? matchesMonthValue(
+          readFirst(row, ["Tháng báo cáo", "_fileMonth", "Tháng", "Month"]),
+          reportMonth,
+          true,
+        )
+      : bankRowMatchesReportMonth(row, reportMonth);
+    if (!matches) return sum;
+    return (
+      sum +
+      parseMoneyToNumber(
+        readFirst(
+          row,
+          source.confirmed
+            ? [
+                "Payment Amount",
+                "Amount",
+                "TOTAL PAYMENT",
+                "Số tiền",
+                "Thành tiền",
+              ]
+            : [
+                "TOTAL PAYMENT",
+                "Payment Amount",
+                "Amount",
+                "Số tiền",
+                "Thành tiền",
+              ],
+        ),
+      )
+    );
+  }, 0);
+}
+
 export function calculateReconciliationTotals(
   appData: ReconciliationSource,
   reportMonth = appData.globalMonth || "03.2026",
@@ -136,13 +205,8 @@ export function calculateReconciliationTotals(
     0,
   );
 
-  const actual = (appData.Bank_North_AE?.data || []).reduce(
-    (sum: number, row: any) =>
-      bankRowMatchesReportMonth(row, reportMonth)
-        ? sum + parseMoneyToNumber(row?.["TOTAL PAYMENT"] ?? 0)
-        : sum,
-    0,
-  );
+  const source = getReconciliationActualSource(appData, reportMonth);
+  const actual = sumReconciliationActual(source, reportMonth);
   const expected = grossPayTotal + deductionsTotal;
 
   return {
@@ -158,7 +222,8 @@ export function calculateReconciliationTotals(
 export function createReconciliationTotalsCalculator(reportMonth: string) {
   const emptyTable = { headers: [], data: [] };
   let grossSource: ReconciliationSource["Sheet1_AE"];
-  let bankSource: ReconciliationSource["Bank_North_AE"];
+  let actualRows: AppData["BankExport"]["data"] | undefined;
+  let actualConfirmed: boolean | undefined;
   let grossPayTotal = 0;
   let actual = 0;
   const contributions = new WeakMap<object, number>();
@@ -167,9 +232,11 @@ export function createReconciliationTotalsCalculator(reportMonth: string) {
       grossSource = appData.Sheet1_AE;
       grossPayTotal = calculateReconciliationTotals({ Sheet1_AE: grossSource, Hold_AE: emptyTable, Bank_North_AE: emptyTable }, reportMonth).grossPayTotal;
     }
-    if (bankSource !== appData.Bank_North_AE) {
-      bankSource = appData.Bank_North_AE;
-      actual = calculateReconciliationTotals({ Sheet1_AE: emptyTable, Hold_AE: emptyTable, Bank_North_AE: bankSource }, reportMonth).actual;
+    const source = getReconciliationActualSource(appData, reportMonth);
+    if (actualRows !== source.rows || actualConfirmed !== source.confirmed) {
+      actualRows = source.rows;
+      actualConfirmed = source.confirmed;
+      actual = sumReconciliationActual(source, reportMonth);
     }
     const deductionsTotal = (appData.Hold_AE?.data || []).reduce((sum: number, row: any) => {
       if (!row || typeof row !== "object") return sum;

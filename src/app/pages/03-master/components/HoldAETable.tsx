@@ -1,3 +1,4 @@
+import { useCloudWorkspace } from '../../../lib/contexts/CloudWorkspaceContext';
 import { useTableRestore } from '../../../hooks/useTableRestore';
 import { deductionsNote, createDeductionsPrioritizer } from "../../../lib/utils/deductions-display";
 import { chooseExcelExport } from "../../../components/ExportScopeDialog";
@@ -102,6 +103,7 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
     onOpenTransactionReference,
   }, ref) => {
     const { appData, updateAppData } = useAppData();
+    const cloud = useCloudWorkspace();
     const restoreTable = useTableRestore();
     const [showSearch, setShowSearch] = React.useState(false);
     const [showClearConfirm, setShowClearConfirm] = React.useState(false);
@@ -126,12 +128,18 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
             Sheet1_AE: appData.Sheet1_AE,
             Hold_AE: appData.Hold_AE,
             Bank_North_AE: appData.Bank_North_AE,
+            BankExport: appData.BankExport,
+            TransactionActivity: appData.TransactionActivity,
+            TransactionMonthCache: appData.TransactionMonthCache,
           },
         ),
       [
         appData.Sheet1_AE,
         appData.Hold_AE,
         appData.Bank_North_AE,
+        appData.BankExport,
+        appData.TransactionActivity,
+        appData.TransactionMonthCache,
         currentReportMonth,
         calculateTotals,
       ],
@@ -790,7 +798,7 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
       return getEligibleHoldRowsForReport(rows, currentReportMonth).length;
     }, [appData.Hold_AE?.data, currentReportMonth]);
 
-    const handleSaveHolds = () => {
+    const handleSaveHolds = async () => {
       if (isCurrentMonthLocked) {
         toast.warning(
           `Hold ${currentReportMonth} đã được lưu. Hãy xóa bản lưu trước nếu cần tạo lại.`,
@@ -840,6 +848,15 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
         };
       });
 
+      if (cloud?.authenticated) {
+        try { await cloud.flush(); }
+        catch (error) {
+          toast.warning("Hold đã chốt trên máy; chưa hoàn tất đồng bộ cloud.", {
+            description: error instanceof Error ? error.message : "Kiểm tra kết nối rồi Đồng bộ ngay.",
+          });
+          return;
+        }
+      }
       toast.success(
         `Đã chốt ${eligibleHoldCount} khoản Hold của ${currentReportMonth}${
           nextMonth
@@ -973,7 +990,7 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
             <div className="flex items-center gap-4 mr-1">
               <div
                 className="flex flex-col items-end"
-                title={`Actual bank: ${formatVNRobust(reconciliationTotals.actual, 0)} · Expected: ${formatVNRobust(reconciliationTotals.expected, 0)}`}
+                title={`Actual payment: ${formatVNRobust(reconciliationTotals.actual, 0)} · Expected: ${formatVNRobust(reconciliationTotals.expected, 0)}`}
               >
                 <span className="text-[8px] font-bold text-muted-foreground uppercase tracking-tighter whitespace-nowrap">TOTAL VARIANCE</span>
                 <span

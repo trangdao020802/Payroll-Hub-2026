@@ -48,9 +48,9 @@ export const ColumnFormatDialog: React.FC<ColumnFormatDialogProps> = ({
             </Label>
             <Select
               value={alignment}
-              onValueChange={(val: "left" | "center" | "right") =>
-                setAlignment(val)
-              }
+              onValueChange={(val) => {
+                if (val === "left" || val === "center" || val === "right") setAlignment(val);
+              }}
             >
               <SelectTrigger className="col-span-3">
                 <SelectValue placeholder="Chọn căn chỉnh" />

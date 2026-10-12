@@ -18,7 +18,6 @@ import {
 } from "./ui/select";
 import {
   normalizeSortRules,
-  type SortDirection,
   type SortRule,
 } from "./sort-utils";
 
@@ -191,13 +190,14 @@ export function CustomSortDialog({
                   </span>
                   <Select
                     value={rule.direction}
-                    onValueChange={(direction: SortDirection) =>
+                    onValueChange={(direction) => {
+                      if (direction !== "asc" && direction !== "desc") return;
                       setDraft((current) =>
                         current.map((item, itemIndex) =>
                           itemIndex === index ? { ...item, direction } : item,
                         ),
-                      )
-                    }
+                      );
+                    }}
                   >
                     <SelectTrigger className="h-9 text-xs font-bold">
                       <SelectValue />

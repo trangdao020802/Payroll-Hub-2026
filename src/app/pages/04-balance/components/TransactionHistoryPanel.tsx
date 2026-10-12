@@ -1,3 +1,4 @@
+import { useCloudWorkspace } from '../../../lib/contexts/CloudWorkspaceContext';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase, isSupabaseConfigured } from '../../../../lib/supabaseClient';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../../components/ui/dialog';
@@ -45,6 +46,7 @@ const markedDocumentId = (value: string, syncNote: string) => (
 );
 
 export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport, onApplyVersions, localMonths, hasPendingEdits, syncRevision = 0, onReportStateChange }: Props) {
+  const cloud = useCloudWorkspace();
   const [userId, setUserId] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -145,6 +147,9 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
     setReport(null);
     setDecision(null);
     const started = context;
+    const operationOwner = authIdentity.current;
+    let savedMonthId: string | null = null;
+    const stillViewingMonth = () => currentContext.current.month === month && authIdentity.current === operationOwner;
     try {
       if (!isSupabaseConfigured()) throw new Error('Chưa cấu hình Supabase URL và publishable/anon key.');
       if (action === 'save') {
@@ -155,10 +160,15 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
         const latest = await loadLatestVersion(supabase, month);
         if (!latest || latest.id !== id) throw new HistorySaveConflictError('Tháng vừa có phiên bản mới hơn trên Supabase. Bấm Check STK & ID để lấy dữ liệu mới nhất.');
         if (!sameTransactionSnapshot(selected, latest.rows, month)) throw new HistorySaveConflictError('Dữ liệu đọc lại từ Supabase chưa khớp Transaction vừa lưu. Bấm Lưu tháng lại trước khi Check STK & ID.');
+        requireUnchangedContext(started);
+        savedMonthId = id;
+        onApplyVersions([latest]);
+        // Monthly Transaction and the complete working data must both be durable.
+        if (cloud?.authenticated) await cloud.flush();
         let employeeMessage: string;
         try { employeeMessage = employeeSyncMessage(await syncTransactionEmployeesToSupabase(supabase, latest.rows)); }
         catch (error) { employeeMessage = `Tháng đã lưu; danh mục nhân viên chưa cập nhật: ${error instanceof Error ? error.message : 'Lỗi kết nối'}`; }
-        if (currentContext.current === started) {
+        if (stillViewingMonth()) {
           setReport(null);
           setMessage(`Đã lưu tháng ${month} lên Supabase: ${selected.length} dòng (#${id}). ${employeeMessage} Check STK & ID sẽ tải lại phiên bản mới nhất.`);
         }
@@ -167,13 +177,14 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
         if (!latest) throw new Error('Tháng này chưa có dữ liệu trên Supabase.');
         requireUnchangedContext(started);
         onApplyVersions([latest]);
-        setMessage(`Đã tải tháng ${month} từ Supabase (#${latest.id}). Bấm Check STK & ID để đối chiếu.`);
+        if (cloud?.authenticated) await cloud.flush();
+        if (stillViewingMonth()) setMessage(`Đã tải tháng ${month} từ Supabase (#${latest.id}). Bấm Check STK & ID để đối chiếu.`);
       } else if (await refreshReport(started)) {
         onOpenReport();
       }
     } catch (error) {
       if (error instanceof HistorySaveConflictError) retry.current = null;
-      if (currentContext.current === started) setMessage(error instanceof Error ? error.message : 'Không thể truy cập kho Transaction.');
+      if (stillViewingMonth()) setMessage(`${savedMonthId ? `Transaction tháng ${month} đã lưu (#${savedMonthId}); đồng bộ các bảng chưa hoàn tất. ` : ''}${error instanceof Error ? error.message : 'Không thể truy cập kho Transaction.'}`);
     } finally {
       operation.current = false;
       setBusy(false);

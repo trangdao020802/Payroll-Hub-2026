@@ -89,6 +89,8 @@ function harness() {
   let serial = 0;
   let commits = 0;
   let online = true;
+  let blockedUpload: { gate: Promise<void>; started: () => void } | null = null;
+  let rejectCommit = false;
   const repository = (owner = "owner") =>
     ({
       owner,
@@ -100,6 +102,12 @@ function harness() {
         return server ? structuredClone(server) : null;
       },
       async upload(value: unknown) {
+        if (blockedUpload) {
+          const blocked = blockedUpload;
+          blockedUpload = null;
+          blocked.started();
+          await blocked.gate;
+        }
         const hash = JSON.stringify(value) || "undefined";
         values.set(hash, structuredClone(value));
         return asset(hash);
@@ -108,6 +116,10 @@ function harness() {
         return structuredClone(values.get(ref.hash));
       },
       async commit(revision: number, next: Manifest) {
+        if (rejectCommit) {
+          rejectCommit = false;
+          throw new Error("commit test failed");
+        }
         if (revision !== (server?.revision || 0)) throw { code: "P0002" };
         commits++;
         server = {
@@ -140,14 +152,28 @@ function harness() {
       get data() {
         return data;
       },
-      edit(key: string, value: unknown) {
+      edit(key: string, value: unknown, notify = true) {
         data = { ...data, [key]: value };
-        engine.changed();
+        if (notify) engine.changed();
       },
     };
   }
   return {
     client,
+    failCommit() {
+      rejectCommit = true;
+    },
+    pauseUpload() {
+      let release!: () => void, started!: () => void;
+      const startedPromise = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      blockedUpload = { gate, started };
+      return { release, started: startedPromise };
+    },
     setOnline(value: boolean) {
       online = value;
       Object.defineProperty(globalThis, "navigator", {
@@ -248,4 +274,54 @@ test("offline edits survive reopening and upload when connection returns", async
     JSON.stringify(["offline edit"]),
   );
   reopened.engine.stop();
+});
+
+test("explicit Save flushes edits before the debounce/effect notifies the engine", async () => {
+  const h = harness(),
+    client = h.client({ Hold_AE: ["old"], BankExport: ["confirmed"] });
+  await client.engine.start();
+  client.edit("Hold_AE", ["saved deduction"], false);
+  await client.engine.flush();
+  assert.equal(
+    h.server?.manifest.fields.Hold_AE.hash,
+    JSON.stringify(["saved deduction"]),
+  );
+  client.engine.stop();
+});
+test("Save waits for an existing upload and then persists newer deductions", async () => {
+  const h = harness(),
+    client = h.client({ Hold_AE: ["old"], BankExport: ["confirmed"] });
+  await client.engine.start();
+  const blocked = h.pauseUpload();
+  client.edit("Hold_AE", ["first"]);
+  const inflight = client.engine.sync();
+  await blocked.started;
+  client.edit("Hold_AE", ["latest"]);
+  let completed = false;
+  const saving = client.engine.flush().then(() => {
+    completed = true;
+  });
+  await Promise.resolve();
+  assert.equal(completed, false);
+  blocked.release();
+  await Promise.all([inflight, saving]);
+  assert.equal(
+    h.server?.manifest.fields.Hold_AE.hash,
+    JSON.stringify(["latest"]),
+  );
+  assert.equal(h.commits, 3);
+  client.engine.stop();
+});
+test("a rejected cloud commit cannot be acknowledged as saved", async () => {
+  const h = harness(),
+    client = h.client({ Hold_AE: ["old"], BankExport: ["confirmed"] });
+  await client.engine.start();
+  h.failCommit();
+  client.edit("Hold_AE", ["new"]);
+  await assert.rejects(client.engine.flush(), /commit test failed/);
+  assert.equal(h.commits, 1);
+  assert.deepEqual(client.data.Hold_AE, ["new"]);
+  await client.engine.flush();
+  assert.equal(h.commits, 2);
+  client.engine.stop();
 });

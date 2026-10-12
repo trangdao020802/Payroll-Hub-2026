@@ -437,54 +437,24 @@ export function useBulkPaymentLogic() {
 
   // 2. RECONCILE CALCULATION SUMMARY
   const calculationSummary = useMemo(() => {
-    const currentMonthVal = appData.globalMonth || "03.2026";
-
-    const sheet1Total = appData.Sheet1_AE.data.reduce(
-      (sum, r) => {
-        const id = String(r["ID Number"] || r["Mã AE"] || r["Mã ae"] || "").trim();
-        if (!id) return sum; // BỎ QUA NẾU TRỐNG ID NUMBER
-        const rowMonthStr = String(r["Tháng báo cáo"] || "").trim();
-        if (!isSameMonthForSumIf(rowMonthStr, currentMonthVal)) return sum;
-        return sum + parseMoneyToNumber(r["TOTAL PAYMENT"] || r["Payment Amount"] || r["Grand Total"] || r["GRAND TOTAL"] || r["Total Payment"] || 0);
-      },
-      0
-    );
-
-    const holdTotal = appData.Hold_AE.data.reduce(
-      (sum, row) => sum + getDeductionContribution(row, currentMonthVal), 0,
-    );
-
-    const calculatedTotal = sheet1Total + holdTotal;
-    const aeTotal = appData.Bank_North_AE.data.reduce(
-      (sum, r) => {
-        const rowMonthRaw = String(r["Tháng báo cáo"] || r["_fileMonth"] || r["Tháng"] || "").trim();
-        const extracted = monMatchComp(rowMonthRaw);
-        
-        const fMonthRaw = String(r["_fileMonth"] || "").trim();
-        const fMonthExtracted = monMatchComp(fMonthRaw);
-        if (fMonthExtracted === targetMonthLabelComp) {
-          return sum + (parseMoneyToNumber(r["TOTAL PAYMENT"]) || 0);
-        }
-
-        if (extracted && extracted !== targetMonthLabelComp) return sum;
-        if (!extracted && rowMonthRaw && !isMonthInStrComp(rowMonthRaw)) return sum;
-        return sum + (parseMoneyToNumber(r["TOTAL PAYMENT"]) || 0);
-      },
-      0
-    );
-    const isMatched = Math.abs(calculatedTotal - aeTotal) < 1;
-    const diff = calculatedTotal - aeTotal;
-
+    const totals = calculateReconciliationTotals({
+      Sheet1_AE: appData.Sheet1_AE, Hold_AE: appData.Hold_AE,
+      Bank_North_AE: appData.Bank_North_AE, BankExport: appData.BankExport,
+      TransactionActivity: appData.TransactionActivity,
+      TransactionMonthCache: appData.TransactionMonthCache,
+      globalMonth: appData.globalMonth,
+    }, appData.globalMonth || "03.2026");
     return {
-      sheet1Total,
-      holdTotal,
+      sheet1Total: totals.grossPayTotal,
+      holdTotal: totals.deductionsTotal,
       bankNorthTotal: holdPaymentDetails.bankNorthT5,
-      calculatedTotal,
-      isMatched,
-      diff,
-      aeTotal,
+      calculatedTotal: totals.expected,
+      isMatched: Math.abs(totals.variance) < 1,
+      diff: -totals.variance,
+      aeTotal: totals.actual,
     };
-  }, [appData.Sheet1_AE.data, appData.Hold_AE.data, appData.Bank_North_AE.data, appData.globalMonth, holdPaymentDetails.bankNorthT5, isMonthInStrComp, monMatchComp, targetMonthLabelComp]);
+  }, [appData.Sheet1_AE, appData.Hold_AE, appData.Bank_North_AE, appData.BankExport,
+    appData.TransactionActivity, appData.TransactionMonthCache, appData.globalMonth, holdPaymentDetails.bankNorthT5]);
 
   // 3. DYNAMIC REPORT STATS BY BU & HOLD CATEGORY
   const dynamicReportStats = useMemo(() => {
