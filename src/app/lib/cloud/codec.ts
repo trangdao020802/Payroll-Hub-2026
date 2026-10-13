@@ -1,6 +1,37 @@
 const TAG = "__payroll_cloud_binary_v1";
-async function pack(value: unknown): Promise<unknown> {
+function pack(value: unknown): unknown | Promise<unknown> {
   if (value instanceof Blob) {
+    return packBlob(value);
+  }
+  if (value instanceof Date)
+    return { __payroll_cloud_date_v1: value.toISOString() };
+  // Most payroll values are plain JSON. Creating one Promise per cell/row
+  // exhausts memory for large rosters even though encoding is in a worker.
+  if (Array.isArray(value)) {
+    const result: unknown[] = new Array(value.length);
+    const pending: Promise<void>[] = [];
+    value.forEach((entry, index) => {
+      const packed = pack(entry);
+      if (packed instanceof Promise) pending.push(packed.then(item => { result[index] = item; }));
+      else result[index] = packed;
+    });
+    return pending.length ? Promise.all(pending).then(() => result) : result;
+  }
+  if (value && typeof value === "object") {
+    const result: Record<string, unknown> = {};
+    const pending: Promise<void>[] = [];
+    for (const [key, entry] of Object.entries(value)) {
+      const packed = pack(entry);
+      // Reserve the key before asynchronous files finish, keeping hashes stable.
+      result[key] = undefined;
+      if (packed instanceof Promise) pending.push(packed.then(item => { result[key] = item; }));
+      else result[key] = packed;
+    }
+    return pending.length ? Promise.all(pending).then(() => result) : result;
+  }
+  return value;
+}
+async function packBlob(value: Blob): Promise<unknown> {
     const bytes = new Uint8Array(await value.arrayBuffer());
     let binary = "";
     for (let i = 0; i < bytes.length; i += 32768)
@@ -18,18 +49,6 @@ async function pack(value: unknown): Promise<unknown> {
           ? value.lastModified
           : null,
     };
-  }
-  if (value instanceof Date)
-    return { __payroll_cloud_date_v1: value.toISOString() };
-  if (Array.isArray(value)) return Promise.all(value.map(pack));
-  if (value && typeof value === "object") {
-    const result: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(value)) {
-      result[key] = await pack(entry);
-    }
-    return result;
-  }
-  return value;
 }
 export async function encode(value: unknown): Promise<Blob> {
   const text = JSON.stringify({ value: await pack(value) });

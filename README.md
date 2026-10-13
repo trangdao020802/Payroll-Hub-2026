@@ -42,6 +42,10 @@ Nếu máy tính của bạn đã cài đặt Node.js và bạn muốn deploy qu
 - `npm run dev` để chạy môi trường code.
 - `npm run build` để đóng gói sinh ra file chạy production.
 
+## Đồng bộ dữ liệu giữa các máy
+
+Dùng cùng tài khoản Payroll để mở số liệu và các tháng đã lưu trên máy khác. Xem [cách lưu, đồng bộ và xử lý lỗi](docs/cloud-workspace.md), bao gồm kiểm thử và giới hạn xác minh.
+
 ## Lưu ý Quan trọng khi Deploy lên Vercel và Đồng bộ Supabase
 
 Khi deploy ứng dụng lên Vercel, nếu bạn gặp lỗi không thể lưu dữ liệu hay đồng bộ (sync) lên Supabase, nguyên nhân phổ biến nhất là **thiếu hoặc chưa cấu hình đúng các Biến Môi trường (Environment Variables)** trên bảng điều khiển (Dashboard) của Vercel.

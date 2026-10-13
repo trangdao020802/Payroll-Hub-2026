@@ -4,6 +4,7 @@ import React, {
   useContext,
   useState,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useMemo,
   useRef,
@@ -30,6 +31,8 @@ import {
 } from "../utils/data-change-tracker";
 import { saveSnapshot } from "../utils/snapshot-manager";
 import { createLatestTaskQueue } from "../utils/latest-task-queue";
+import { CLOUD_HASHES_KEY, CLOUD_CACHE_EVENT, persistedFieldHashes, restoreFieldHashes, withAppStorageLock, type StoredCloudHashes } from "../cloud/field-cache";
+import { OWNER_KEY } from "../cloud/engine";
 
 // Configure localforage
 localforage.config({
@@ -65,10 +68,11 @@ interface AppDataCtx {
   isLoading: boolean;
   rawAppData: AppData;
   isStorageHydrating: boolean;
+  hasStoredData: boolean;
 }
 
 interface AppActionsCtx {
-  applyCloudData: (updater: (data: AppData) => AppData) => void;
+  applyCloudData: (updater: (data: AppData) => AppData) => Promise<void>;
   updateAppData: (
     updater: ((prev: AppData) => AppData) | Partial<AppData>,
     saveToHistory?: boolean,
@@ -100,6 +104,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const [isSyncing, setIsSyncing] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isStorageHydrating, setIsStorageHydrating] = useState(true);
+  const [hasStoredData, setHasStoredData] = useState(false);
   const [activePathname, setActivePathname] = useState(() =>
     typeof window === "undefined" ? "/" : window.location.pathname,
   );
@@ -109,6 +114,16 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const immediatePersistRequestedRef = useRef(false);
   const persistenceQueueRef = useRef(createLatestTaskQueue());
   const lastAutoSnapshotTimeRef = useRef<number>(0);
+  const cloudApplyResolvers = useRef<Array<() => void>>([]);
+  const [cloudCacheVersion, setCloudCacheVersion] = useState(0);
+  useLayoutEffect(() => {
+    for (const resolve of cloudApplyResolvers.current.splice(0)) resolve();
+  }, [state]);
+  useEffect(() => {
+    const refreshHashes = () => setCloudCacheVersion(version => version + 1);
+    window.addEventListener(CLOUD_CACHE_EVENT, refreshHashes);
+    return () => window.removeEventListener(CLOUD_CACHE_EVENT, refreshHashes);
+  }, []);
 
   useEffect(() => {
     const syncActivePathname = () => setActivePathname(window.location.pathname);
@@ -211,6 +226,12 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
               (saved as any)[field] = legacySplitFallback[field];
             }
           });
+          const cached = await localforage.getItem<{ owner: string; hashes: Record<string, string> }>(CLOUD_HASHES_KEY);
+          if (cached?.owner && cached.owner === localStorage.getItem(OWNER_KEY)) {
+            // Register before migrations: any migrated/replaced value loses its
+            // old hash automatically and is safely fetched again from cloud.
+            restoreFieldHashes(cached.owner, saved, cached.hashes || {});
+          }
         }
 
         if (saved) {
@@ -526,6 +547,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
               ...normalizeGrossPaySpecialCenters(saved as AppData),
             },
           }));
+          setHasStoredData(true);
         } else {
           SPLIT_STORAGE_FIELDS.forEach((field) => {
             persistedSplitRefs.current.set(field, INITIAL_APP_DATA[field]);
@@ -539,7 +561,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         setIsLoading(false);
       }
     };
-    loadData();
+    void withAppStorageLock(loadData);
   }, []);
 
   // ── Debounced sync to storage (1.5s) ──
@@ -560,6 +582,12 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         if (dataToSave.Ae_Global_Inputs)
           dataToSave.Ae_Global_Inputs =
             dataToSave.Ae_Global_Inputs.map(stripFileObj);
+        const durableData = { ...dataToSave };
+        const previousHashes = await localforage.getItem<StoredCloudHashes>(CLOUD_HASHES_KEY);
+        const written = new Set<string>();
+        // Invalidate first. A failed/partial IndexedDB save must never leave a
+        // previous hash certifying newer (or older) local values.
+        await localforage.removeItem(CLOUD_HASHES_KEY);
 
         // Persist large collections only when their reference changed. A
         // metadata-only update (tab, date, UI setting, input status) must not
@@ -569,10 +597,15 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
           if (persistedSplitRefs.current.get(field) !== value) {
             await localforage.setItem(getSplitStorageKey(field), value);
             persistedSplitRefs.current.set(field, value);
+            written.add(field);
           }
           delete (dataToSave as any)[field];
         }
         await localforage.setItem(STORAGE_META_KEY, dataToSave);
+        const owner = localStorage.getItem(OWNER_KEY);
+        if (owner) await localforage.setItem(CLOUD_HASHES_KEY, {
+          owner, hashes: persistedFieldHashes(owner, durableData, SPLIT_STORAGE_FIELDS, written, previousHashes),
+        });
 
         // The split snapshot is now complete, so retaining the legacy full
         // object only makes every future reload clone the same large data a
@@ -621,10 +654,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     const persistImmediately = immediatePersistRequestedRef.current;
     const id = setTimeout(() => {
       immediatePersistRequestedRef.current = false;
-      void persistenceQueueRef.current.enqueue(saveData);
+      void persistenceQueueRef.current.enqueue(() => withAppStorageLock(saveData));
     }, persistImmediately ? 0 : 3000);
     return () => clearTimeout(id);
-  }, [state.present, isLoading, isStorageHydrating]);
+  }, [state.present, isLoading, isStorageHydrating, cloudCacheVersion]);
 
   // ── Default center seeding ──
   useEffect(() => {
@@ -837,12 +870,15 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   const applyCloudData = useCallback((updater: (data: AppData) => AppData) => {
     immediatePersistRequestedRef.current = true;
-    setState(prev => ({ past: [], present: updater(prev.present), future: [] }));
+    return new Promise<void>(resolve => {
+      cloudApplyResolvers.current.push(resolve);
+      setState(prev => ({ past: [], present: updater(prev.present), future: [] }));
+    });
   }, []);
 
   const dataValue = useMemo<AppDataCtx>(
-    () => ({ appData: computedPresent, rawAppData: state.present, isLoading, isStorageHydrating }),
-    [computedPresent, state.present, isLoading, isStorageHydrating],
+    () => ({ appData: computedPresent, rawAppData: state.present, isLoading, isStorageHydrating, hasStoredData }),
+    [computedPresent, state.present, isLoading, isStorageHydrating, hasStoredData],
   );
 
   const actionsValue = useMemo<AppActionsCtx>(

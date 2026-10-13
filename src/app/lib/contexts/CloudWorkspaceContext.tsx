@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  useMemo,
   type ReactNode,
 } from "react";
 import { Cloud, CloudOff, LoaderCircle } from "lucide-react";
@@ -14,6 +15,7 @@ import { useAppActions, useAppDataOnly } from "./AppDataContext";
 import { CloudRepository } from "../cloud/repository";
 import { SyncEngine, OWNER_KEY, type SyncState } from "../cloud/engine";
 import { saveSnapshot } from "../utils/snapshot-manager";
+import { withDeadline } from "../cloud/deadline";
 import {
   Dialog,
   DialogContent,
@@ -38,12 +40,16 @@ export function CloudSyncButton() {
   const label = !cloud.authenticated
     ? "Đăng nhập để đồng bộ"
     : cloud.state.status === "synced"
-      ? "Đồng bộ: Bật"
+      ? "Đã đồng bộ"
       : cloud.state.status === "saving"
         ? "Đang đồng bộ"
-        : cloud.state.status === "conflict"
-          ? "Xung đột dữ liệu"
-          : "Kiểm tra đồng bộ";
+        : cloud.state.status === "starting"
+          ? "Đang tải dữ liệu"
+          : cloud.state.status === "conflict"
+            ? "Xung đột dữ liệu"
+            : cloud.state.status === "offline"
+              ? "Chờ kết nối"
+              : "Lỗi đồng bộ";
   return (
     <button
       type="button"
@@ -52,7 +58,7 @@ export function CloudSyncButton() {
       aria-label={label}
       className="inline-flex shrink-0 items-center gap-1 rounded-full border border-primary/20 px-2 py-1 text-[10px] text-primary whitespace-nowrap active:scale-[0.98]"
     >
-      {cloud.state.status === "saving" || cloud.state.status === "starting" ? (
+      {cloud.authenticated && (cloud.state.status === "saving" || cloud.state.status === "starting") ? (
         <LoaderCircle className="h-3 w-3 animate-spin" />
       ) : cloud.state.status === "offline" ? (
         <CloudOff className="h-3 w-3" />
@@ -64,7 +70,7 @@ export function CloudSyncButton() {
   );
 }
 export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
-  const { rawAppData, isStorageHydrating } = useAppDataOnly();
+  const { rawAppData, isStorageHydrating, hasStoredData } = useAppDataOnly();
   const { applyCloudData } = useAppActions();
   const dataRef = useRef(rawAppData);
   useLayoutEffect(() => {
@@ -87,12 +93,17 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!isSupabaseConfigured()) return;
     let alive = true;
-    supabase.auth.getSession().then(({ data, error }) => {
+    withDeadline(() => supabase.auth.getSession(), "Kiểm tra đăng nhập quá lâu. Tải lại trang để thử lại.").then(({ data, error }) => {
       if (alive) {
-        setUser(data.session?.user || null);
+        setUser(previous => previous?.id === data.session?.user.id ? previous : data.session?.user || null);
         setAuthReady(true);
         if (error) setLoginError(error.message);
       }
+    }).catch(error => {
+      if (!alive) return;
+      setAuthReady(true);
+      setState({ status: "error", message: error instanceof Error ? error.message : "Không thể kiểm tra đăng nhập." });
+      setLoginError(error instanceof Error ? error.message : "Không thể kiểm tra đăng nhập.");
     });
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!alive) return;
@@ -116,7 +127,7 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
       applyCloudData,
       (next) => {
         if (alive) {
-          setState(next);
+          setState(previous => previous.status === next.status && previous.message === next.message && previous.updatedAt === next.updatedAt && previous.conflicts === next.conflicts ? previous : next);
           if (
             next.status === "synced" ||
             next.status === "saving" ||
@@ -137,7 +148,9 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
     );
     engine.current = instance;
     void instance.start();
-    const retry = () => void instance.retry();
+    const retry = () => {
+      if (document.visibilityState !== "hidden") void instance.retry();
+    };
     const interval = setInterval(retry, 30000);
     window.addEventListener("online", retry);
     window.addEventListener("focus", retry);
@@ -162,8 +175,9 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
     await current.flush();
   }, []);
   const owned = localStorage.getItem(OWNER_KEY);
+  const hasOwnCache = !!user && owned === user.id && !isStorageHydrating && hasStoredData;
   const gated =
-    !authReady || (!!user && unlockedOwner !== user.id) || (!!owned && !user);
+    !authReady || (!!user && unlockedOwner !== user.id && !hasOwnCache) || (!!owned && !user);
   const showDialog = dialogOpen || (authReady && gated);
   async function login(event: React.FormEvent) {
     event.preventDefault();
@@ -188,20 +202,15 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
   const messages: Record<SyncState["status"], string> = {
     starting: "Đang mở dữ liệu cloud…",
     saving: "Đang lưu thay đổi lên cloud…",
-    synced: "Đồng bộ giữa các máy: Bật",
+    synced: "Đã lưu và đồng bộ dữ liệu giữa các máy.",
     offline: "Mất kết nối — thay đổi đang được giữ trên máy.",
     conflict: "Cần chọn bản dữ liệu",
     error: "Đồng bộ chưa hoàn tất",
   };
+  const open = useCallback(() => setDialogOpen(true), []);
+  const contextValue = useMemo(() => ({ flush, open, state, authenticated: !!user }), [flush, open, state, user]);
   return (
-    <Context.Provider
-      value={{
-        flush,
-        open: () => setDialogOpen(true),
-        state,
-        authenticated: !!user,
-      }}
-    >
+    <Context.Provider value={contextValue}>
       {gated ? (
         <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
           {!authReady ? "Đang kiểm tra đăng nhập…" : "Mở dữ liệu đồng bộ"}
@@ -301,6 +310,7 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
               ) : (
                 <button
                   className="rounded-full border px-3 py-2"
+                  disabled={state.status === "starting" || state.status === "saving"}
                   onClick={() => void engine.current?.retry()}
                 >
                   Đồng bộ ngay

@@ -7,6 +7,7 @@ import {
   mergeManifest,
 } from "./protocol";
 import { CloudRepository } from "./repository";
+import { cachedFieldHash, rememberCloudField, sameManifest, CLOUD_CACHE_EVENT } from "./field-cache";
 export type SyncStatus =
   | "starting"
   | "saving"
@@ -34,13 +35,14 @@ export class SyncEngine {
   private ready = false;
   private applying = false;
   private initializing = false;
+  private startTask: Promise<void> | null = null;
   private timer?: ReturnType<typeof setTimeout>;
   private conflictRemote: Workspace | null = null;
   private staged: Manifest | null = null;
   constructor(
     private repository: CloudRepository,
     private getData: () => AppData,
-    private apply: (updater: (data: AppData) => AppData) => void,
+    private apply: (updater: (data: AppData) => AppData) => void | Promise<void>,
     private report: (state: SyncState) => void,
     private backup: () => Promise<void>,
   ) {}
@@ -52,35 +54,71 @@ export class SyncEngine {
   }
   private async install(remote: Workspace, fields: string[], replace = false) {
     const patch: Record<string, unknown> = {};
-    for (const key of fields)
-      patch[key] = await this.repository.download(remote.manifest.fields[key]);
+    const before = { ...this.getData() } as unknown as Record<string, unknown>;
+    const ordered = [...fields].sort((a, b) => remote.manifest.fields[a].bytes - remote.manifest.fields[b].bytes);
+    let completed = 0;
+    for (let offset = 0; offset < ordered.length;) {
+      // Fetch small tables together, but decode large rosters one at a time.
+      const count = remote.manifest.fields[ordered[offset]].bytes > 4 * 1024 * 1024 ? 1 : 3;
+      const batch = ordered.slice(offset, offset + count).filter(key => count === 1 || remote.manifest.fields[key].bytes <= 4 * 1024 * 1024);
+      await Promise.all(batch.map(async key => {
+        patch[key] = await this.repository.download(remote.manifest.fields[key]);
+      }));
+      if (this.stopped) return;
+      completed += batch.length;
+      offset += batch.length;
+      this.report({ status: this.ready ? "saving" : "starting", message: `Đang tải dữ liệu đã lưu: ${completed}/${fields.length} phần.` });
+    }
     if (this.stopped) return;
     this.applying = true;
     // Preserve edits made while the download was in flight.
-    this.apply((current) => {
-      const next = {
-        ...(replace ? { ...INITIAL_APP_DATA, Timesheet_Roster: [] } : current),
-      } as Record<string, unknown>;
-      for (const key of fields) {
-        if (!this.dirty.has(key)) {
-          next[key] = patch[key];
-          this.refs[key] = patch[key];
+    try {
+      await this.apply((current) => {
+        const currentFields = current as unknown as Record<string, unknown>;
+        const next = {
+          ...(replace ? { ...INITIAL_APP_DATA, Timesheet_Roster: [] } : current),
+        } as Record<string, unknown>;
+        if (replace) {
+          for (const key of this.dirty) next[key] = currentFields[key];
+          this.refs = { ...next };
         }
-      }
-      return next as unknown as AppData;
-    });
-    this.applying = false;
+        for (const key of fields) {
+          if (!this.dirty.has(key) && currentFields[key] === before[key]) {
+            next[key] = patch[key];
+            this.refs[key] = patch[key];
+            rememberCloudField(this.repository.owner, key, patch[key], remote.manifest.fields[key].hash);
+          } else {
+            // Keep edits made after the download started, even before changed()
+            // has had a chance to run in React's passive effect.
+            next[key] = currentFields[key];
+            this.dirty.add(key);
+            this.refs[key] = before[key];
+          }
+        }
+        return next as unknown as AppData;
+      });
+    } finally {
+      this.applying = false;
+    }
+    this.changed();
   }
   async retry() {
     if (this.ready) await this.sync();
     else await this.start();
   }
-  async start() {
-    if (this.initializing || this.stopped) return;
+  start(): Promise<void> {
+    if (this.startTask) return this.startTask;
+    if (this.stopped || this.ready) return Promise.resolve();
+    const task = this.initialize();
+    this.startTask = task;
+    return task.finally(() => {
+      if (this.startTask === task) this.startTask = null;
+    });
+  }
+  private async initialize() {
     this.initializing = true;
     this.report({ status: "starting" });
     try {
-      await this.repository.checkMembership();
       const owner = localStorage.getItem(OWNER_KEY);
       if (owner && owner !== this.repository.owner)
         throw new Error(
@@ -91,21 +129,26 @@ export class SyncEngine {
           ? localStorage.getItem(checkpointKey(owner))
           : null;
       const checkpoint = stored ? JSON.parse(stored) : null;
+      this.refs = { ...this.getData() };
+      this.base = checkpoint?.base || null;
+      this.dirty = new Set(checkpoint?.dirty || []);
+      await this.repository.checkMembership();
       const remote = await this.repository.read();
       if (this.stopped) return;
-      this.refs = { ...this.getData() };
       if (checkpoint?.base) {
-        this.base = checkpoint.base;
-        this.dirty = new Set(checkpoint.dirty || []);
         // A tab may have closed before IndexedDB finished writing a cloud pull.
         // Restore clean fields, while keeping the baseline of pending offline edits.
         if (remote) {
           const clean = Object.keys(remote.manifest.fields).filter(
             (key) => !this.dirty.has(key),
           );
-          await this.install(remote, clean);
+          const current = this.getData() as unknown as Record<string, unknown>;
+          const missing = clean.filter(key => cachedFieldHash(this.repository.owner, key, current[key]) !== remote.manifest.fields[key].hash);
+          if (missing.length) await this.install(remote, missing);
           const fields = { ...this.base!.manifest.fields };
-          for (const key of clean) fields[key] = remote.manifest.fields[key];
+          for (const key of clean) {
+            if (!this.dirty.has(key)) fields[key] = remote.manifest.fields[key];
+          }
           this.base = { ...remote, manifest: { version: 1, fields } };
         }
       } else if (remote) {
@@ -147,13 +190,17 @@ export class SyncEngine {
     }
   }
   changed() {
-    if (!this.ready || this.stopped || this.applying) return;
+    if ((!this.ready && !this.initializing) || this.stopped || this.applying) return;
     const data = this.getData() as unknown as Record<string, unknown>;
     for (const key of new Set([
       ...Object.keys(data),
       ...Object.keys(this.refs),
     ])) {
       if (data[key] !== this.refs[key]) this.dirty.add(key);
+    }
+    if (!this.ready) {
+      if (this.base) this.checkpoint();
+      return;
     }
     this.checkpoint();
     if (this.dirty.size && !this.conflictRemote) {
@@ -236,7 +283,7 @@ export class SyncEngine {
         await this.repository.cleanup().catch(() => undefined);
       }
       for (const key of pending) {
-        local.fields[key] = await this.repository.upload(snapshot[key]);
+        local.fields[key] = await this.repository.upload(snapshot[key], this.base?.manifest.fields[key]);
         if (this.stopped) return;
       }
       // Refresh after uploads: another computer may have committed meanwhile.
@@ -266,26 +313,36 @@ export class SyncEngine {
       if (remote && incoming.length) await this.install(remote, incoming);
       if (this.stopped) return;
       let committed = remote;
-      if (pending.length)
+      const merged = mergeManifest(this.base?.manifest || EMPTY, local, remote?.manifest || EMPTY);
+      if (pending.length && (!remote || !sameManifest(merged, remote.manifest)))
         committed = await this.repository.commit(
           remote?.revision || 0,
-          mergeManifest(
-            this.base?.manifest || EMPTY,
-            local,
-            remote?.manifest || EMPTY,
-          ),
+          merged,
         );
       if (this.stopped) return;
       for (const key of pending) {
         this.refs[key] = snapshot[key];
+        rememberCloudField(this.repository.owner, key, snapshot[key], local.fields[key].hash);
         if (
           (this.getData() as unknown as Record<string, unknown>)[key] ===
           snapshot[key]
         )
           this.dirty.delete(key);
       }
-      this.base = committed;
+      if (committed) {
+        const fields = { ...committed.manifest.fields };
+        // Edits made during a remote pull still refer to the old baseline.
+        // Advancing it would hide a same-table conflict on the next upload.
+        for (const key of incoming) {
+          if (!this.dirty.has(key)) continue;
+          const previous = this.base?.manifest.fields[key];
+          if (previous) fields[key] = previous;
+          else delete fields[key];
+        }
+        this.base = { ...committed, manifest: { version: 1, fields } };
+      } else this.base = null;
       this.checkpoint();
+      if (pending.length && typeof window !== "undefined") window.dispatchEvent(new Event(CLOUD_CACHE_EVENT));
       if (pending.length) void this.repository.cleanup().catch(() => undefined);
       this.report({
         status: this.dirty.size ? "saving" : "synced",

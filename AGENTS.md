@@ -54,3 +54,7 @@ Ensure any layout or interface matches the configured parameters:
 Keep the timesheet and payroll core business rules separate from UI components.
 *   **Zero Junk Code**: Commented out blocks of inactive code, temporary console.logs, or placeholder test arrays inside `/src/app/constants/timesheet-logic.ts` must be pruned or encapsulated cleanly.
 *   **Helper Modularity**: Avoid embedding continuous states (like window scroll or mouse move) in React state. Use custom hooks, memoized helpers, and web workers to keep calculation logic completely distinct from layout rendering.
+
+## Cloud workspace changes
+
+Read [docs/cloud-workspace.md](docs/cloud-workspace.md) before changing synchronization, local persistence or the Save contract. It records the cross-device requirements, cache correctness boundary and verification limitations.
