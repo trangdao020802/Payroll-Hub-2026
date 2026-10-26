@@ -1268,7 +1268,10 @@ export function MasterAE() {
             transition={{ type: "spring", damping: 25, stiffness: 200 }}
             className="absolute inset-0 flex w-full flex-col"
             style={{
-              padding: "0px",
+              paddingLeft: "18px",
+              paddingRight: "12px",
+              paddingTop: "12px",
+              paddingBottom: "12px",
               boxSizing: "border-box",
             }}
           >

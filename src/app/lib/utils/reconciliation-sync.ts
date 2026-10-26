@@ -62,7 +62,18 @@ function bankRowMatchesReportMonth(row: any, reportMonth: string): boolean {
     return true;
   }
   return matchesMonthValue(
-    readFirst(row, ["Tháng báo cáo", "_fileMonth", "Tháng"]),
+    readFirst(row, [
+      "Tháng báo cáo",
+      "THÁNG BÁO CÁO",
+      "_fileMonth",
+      "Tháng",
+      "THÁNG",
+      "Month",
+      "MONTH",
+      "Kỳ báo cáo",
+      "KY BAO CAO",
+      "Report Month",
+    ]),
     reportMonth,
     true,
   );
@@ -127,7 +138,18 @@ export function getReconciliationActualSource(
     : undefined;
   if (cached?.activity?.lastAction === "saved")
     return { rows: cached.table.data, confirmed: true };
-  return { rows: appData.Bank_North_AE?.data || [], confirmed: false };
+
+  const bankNorthRows = appData.Bank_North_AE?.data || [];
+  if (bankNorthRows.some((row) => bankRowMatchesReportMonth(row, reportMonth))) {
+    return { rows: bankNorthRows, confirmed: false };
+  }
+
+  // Fallback: If Bank_North_AE has no matching rows for this month, but BankExport has rows, use BankExport
+  if (appData.BankExport?.data?.length) {
+    return { rows: appData.BankExport.data, confirmed: false };
+  }
+
+  return { rows: bankNorthRows, confirmed: false };
 }
 
 function sumReconciliationActual(

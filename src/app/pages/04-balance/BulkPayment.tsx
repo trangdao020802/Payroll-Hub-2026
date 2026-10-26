@@ -1893,7 +1893,7 @@ export function BulkPayment({
 
       return {
         key: header,
-        label: /^NO\.$/i.test(header) ? "No." : header,
+        label: header,
         type,
         align: type === "currency" ? ("right" as const) : ("left" as const),
       };

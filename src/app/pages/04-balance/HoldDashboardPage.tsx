@@ -12,6 +12,7 @@ export function HoldDashboardPage(): React.ReactElement {
           animate={{ y: 0, opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.14, ease: "easeOut" }}
+          style={{ padding: "12px" }}
           className="w-full h-full flex flex-col min-h-0 bg-transparent items-center overflow-hidden"
         >
           <HoldAddDashboard />

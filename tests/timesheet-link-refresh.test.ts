@@ -97,8 +97,8 @@ test("refresh uses Settings sync for only missing links, handles file-only sourc
   assert.deepEqual(requests, ["missing-link", "https://docs.google.com/spreadsheets/d/new-file/edit"]);
   const missingSyncedAt = String(harness.getData().Timesheet_InputList.find((row) => row.id === "missing")?.lastSyncedAt || "");
   const fileSyncedAt = String(harness.getData().Timesheet_InputList.find((row) => row.id === "file")?.lastSyncedAt || "");
-  assert.match(missingSyncedAt, /^\\d{2}:\\d{2} \\d{2}\\/\\d{2}\\/\\d{4}$/);
-  assert.match(fileSyncedAt, /^\\d{2}:\\d{2} \\d{2}\\/\\d{2}\\/\\d{4}$/);
+  assert.match(missingSyncedAt, /^\d{2}:\d{2} \d{2}\/\d{2}\/\d{4}$/);
+  assert.match(fileSyncedAt, /^\d{2}:\d{2} \d{2}\/\d{2}\/\d{4}$/);
   assert.ok([missingSyncedAt, fileSyncedAt].includes(harness.render().latestSyncAt));
   assert.equal(harness.getData().Timesheet_Roster.length, 3);
   assert.equal(harness.getData().Timesheet_Roster[0].ma_nv, "UNCHANGED");

@@ -51,10 +51,10 @@ export function calculateTrialBalanceHeaderTotals(
           if (isBasePayroll || isExplicitHold) {
             totals.hold += Math.abs(parseMoneyToNumber(row.rawHold || (!row.customMonthDisplay ? row.chi : (row.hold || row.chi)) || 0));
           }
-        }
-        const cancelVal = Math.abs(parseMoneyToNumber(row.rawCancel ?? row.cancel ?? 0));
-        if (cancelVal > 0) {
-          totals.cancel += cancelVal;
+          const cancelVal = Math.abs(parseMoneyToNumber(row.rawCancel ?? row.cancel ?? 0));
+          if (cancelVal > 0) {
+            totals.cancel += cancelVal;
+          }
         }
         if (origin > 0 && origin < report) totals.add += Math.abs(parseMoneyToNumber(row.rawAdd ?? row.add ?? 0));
       }

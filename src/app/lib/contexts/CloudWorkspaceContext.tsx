@@ -36,9 +36,11 @@ export function useCloudWorkspace() {
 }
 export function CloudSyncButton() {
   const cloud = useContext(Context);
-  if (!cloud) return null;
-  const label = !cloud.authenticated
-    ? "Đăng nhập để đồng bộ"
+  const configured = isSupabaseConfigured();
+  const label = !configured
+    ? "Chưa kết nối Cloud"
+    : !cloud.authenticated
+      ? "Đăng nhập để đồng bộ"
     : cloud.state.status === "synced"
       ? "Đã đồng bộ"
       : cloud.state.status === "saving"
@@ -174,25 +176,49 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
       throw new Error("Đăng nhập để đồng bộ đầy đủ các bảng lên cloud.");
     await current.flush();
   }, []);
+  const configured = isSupabaseConfigured();
   const owned = localStorage.getItem(OWNER_KEY);
   const hasOwnCache = !!user && owned === user.id && !isStorageHydrating && hasStoredData;
   const gated =
-    !authReady || (!!user && unlockedOwner !== user.id && !hasOwnCache) || (!!owned && !user);
+    configured &&
+    (!authReady || (!!user && unlockedOwner !== user.id && !hasOwnCache) || (!!owned && !user));
   const showDialog = dialogOpen || (authReady && gated);
-  async function login(event: React.FormEvent) {
+  const [mode, setMode] = useState<"login" | "signup">("login");
+
+  async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
+    if (!isSupabaseConfigured()) {
+      setLoginError("Chưa cấu hình Supabase Cloud (cần VITE_SUPABASE_URL & VITE_SUPABASE_ANON_KEY trong Settings/Biến môi trường).");
+      return;
+    }
     setBusy(true);
     setLoginError("");
     try {
-      const { data: loginData, error } = await supabase.auth.signInWithPassword(
-        { email: email.trim(), password },
-      );
-      if (error) throw error;
-      setUser(loginData.user);
-      setDialogOpen(false);
+      if (mode === "signup") {
+        const { data: signUpData, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+        });
+        if (error) throw error;
+        if (signUpData.user) {
+          setUser(signUpData.user);
+          if (!signUpData.session) {
+            setLoginError("Đã gửi email xác nhận. Vui lòng kiểm tra hộp thư để xác nhận tài khoản nếu cần thiết.");
+          } else {
+            setDialogOpen(false);
+          }
+        }
+      } else {
+        const { data: loginData, error } = await supabase.auth.signInWithPassword(
+          { email: email.trim(), password },
+        );
+        if (error) throw error;
+        setUser(loginData.user);
+        setDialogOpen(false);
+      }
     } catch (error) {
       setLoginError(
-        error instanceof Error ? error.message : "Không thể đăng nhập",
+        error instanceof Error ? error.message : (mode === "signup" ? "Không thể đăng ký" : "Không thể đăng nhập"),
       );
     } finally {
       setPassword("");
@@ -235,7 +261,18 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
             lưu. Tự đồng bộ sau khi đăng nhập.
           </DialogDescription>
           {!user ? (
-            <form onSubmit={login} className="space-y-3">
+            <form onSubmit={handleSubmit} className="space-y-3">
+              {!configured && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-50/80 p-3 text-xs text-amber-900 space-y-1">
+                  <p className="font-bold">⚠️ Chưa cấu hình Supabase Cloud</p>
+                  <p className="leading-relaxed">
+                    Để kích hoạt đồng bộ qua Cloud giữa các thiết bị, vui lòng cung cấp biến môi trường <strong>VITE_SUPABASE_URL</strong> và <strong>VITE_SUPABASE_ANON_KEY</strong> trong phần Settings của AI Studio hoặc file <code>.env</code>.
+                  </p>
+                  <p className="leading-relaxed text-[11px] text-amber-800/80">
+                    Dữ liệu trên máy của bạn hiện tại vẫn đang được lưu trữ cục bộ đầy đủ và an toàn.
+                  </p>
+                </div>
+              )}
               <label className="block text-sm">
                 Email
                 <input
@@ -263,13 +300,41 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
                   {loginError}
                 </p>
               )}
-              <button
-                type="submit"
-                disabled={busy || !isSupabaseConfigured()}
-                className="rounded-full bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-50"
-              >
-                {busy ? "Đang đăng nhập…" : "Đăng nhập"}
-              </button>
+              <div className="flex items-center justify-between pt-1">
+                <button
+                  type="submit"
+                  disabled={busy || !configured}
+                  className="rounded-full bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-50 cursor-pointer"
+                >
+                  {busy ? "Đang xử lý…" : mode === "signup" ? "Đăng ký tài khoản" : "Đăng nhập"}
+                </button>
+                {configured && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode((m) => (m === "login" ? "signup" : "login"));
+                      setLoginError("");
+                    }}
+                    className="text-xs text-primary hover:underline cursor-pointer"
+                  >
+                    {mode === "login" ? "Chưa có tài khoản? Đăng ký" : "Đã có tài khoản? Đăng nhập"}
+                  </button>
+                )}
+              </div>
+              {owned && (
+                <div className="pt-2 text-center border-t border-border/50">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      localStorage.removeItem(OWNER_KEY);
+                      setDialogOpen(false);
+                    }}
+                    className="text-xs text-muted-foreground hover:text-foreground underline cursor-pointer"
+                  >
+                    Bỏ qua phiên tài khoản cũ và tiếp tục dùng trên máy
+                  </button>
+                </div>
+              )}
             </form>
           ) : (
             <div className="space-y-3 text-sm">

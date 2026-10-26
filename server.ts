@@ -102,8 +102,8 @@ app.get("/api/health", (req, res) => {
 
 app.get("/api/supabase-config", (req, res) => {
   res.json({
-    url: process.env.VITE_SUPABASE_URL || "",
-    anonKey: process.env.VITE_SUPABASE_ANON_KEY || ""
+    url: process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "",
+    anonKey: process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || ""
   });
 });
 

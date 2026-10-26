@@ -2471,7 +2471,7 @@ export function TimesheetHub() {
             transition={{ type: "spring", damping: 25, stiffness: 200 }}
             className="absolute inset-0 flex flex-col w-full p-3.5"
             style={{
-              paddingLeft: "14px",
+              paddingLeft: "18px",
               paddingRight: "14px",
               paddingTop: "12px",
               paddingBottom: "12px",

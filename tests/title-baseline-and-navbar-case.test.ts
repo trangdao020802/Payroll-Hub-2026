@@ -47,7 +47,7 @@ test("table switchers use unique icons and Timesheet summary captions share one 
   );
 
   const centersBlock =
-    navbar.match(/"\/centers": \[([\s\S]*?)\],\n  "\/audit"/)?.[1] || "";
+    navbar.match(/"\/centers": \[([\s\S]*?)\],\n {2}"\/audit"/)?.[1] || "";
   const masterBlock =
     navbar.match(/"\/master-ae": \[([\s\S]*?)\],\n};/)?.[1] || "";
   const iconsOf = (block: string) =>

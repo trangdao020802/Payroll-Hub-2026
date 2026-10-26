@@ -219,7 +219,7 @@ export function Navbar({ onOpenSettings }: NavbarProps) {
                     aria-label={`Chuyển bảng, hiện tại: ${currentPageLabel}`}
                   >
                     <span 
-                      className="navbar-current-label truncate font-bold text-[14px] px-[2px]"
+                      className="navbar-current-label truncate"
                       style={{ fontWeight: "bold", fontSize: "14px", paddingLeft: "2px", paddingRight: "2px" }}
                     >
                       {currentPageLabel}
