@@ -31,7 +31,7 @@ import {
 } from "../utils/data-change-tracker";
 import { saveSnapshot } from "../utils/snapshot-manager";
 import { createLatestTaskQueue } from "../utils/latest-task-queue";
-import { CLOUD_HASHES_KEY, CLOUD_CACHE_EVENT, persistedFieldHashes, restoreFieldHashes, withAppStorageLock, type StoredCloudHashes } from "../cloud/field-cache";
+import { CLOUD_HASHES_KEY, CLOUD_CACHE_EVENT, persistedFieldHashes, restoreFieldHashes, prepareHydrationTables, withAppStorageLock, type StoredCloudHashes } from "../cloud/field-cache";
 import { OWNER_KEY } from "../cloud/engine";
 
 // Configure localforage
@@ -72,6 +72,7 @@ interface AppDataCtx {
 }
 
 interface AppActionsCtx {
+  setCloudRestorePending: (pending: boolean) => void;
   applyCloudData: (updater: (data: AppData) => AppData) => Promise<void>;
   updateAppData: (
     updater: ((prev: AppData) => AppData) | Partial<AppData>,
@@ -115,6 +116,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const persistenceQueueRef = useRef(createLatestTaskQueue());
   const lastAutoSnapshotTimeRef = useRef<number>(0);
   const cloudApplyResolvers = useRef<Array<() => void>>([]);
+  const cloudRestorePendingRef = useRef(false);
+  const setCloudRestorePending = useCallback((pending: boolean) => {
+    cloudRestorePendingRef.current = pending;
+  }, []);
   const [cloudCacheVersion, setCloudCacheVersion] = useState(0);
   useLayoutEffect(() => {
     for (const resolve of cloudApplyResolvers.current.splice(0)) resolve();
@@ -235,6 +240,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (saved) {
+          saved = prepareHydrationTables(saved);
           // Split the legacy shared roster into page-owned namespaces. Older
           // versions let Master and Timesheet overwrite the same Q_Roster
           // array, so migrate once and never read that shared key again.
@@ -689,6 +695,9 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       persistImmediately: boolean = false,
       sourceFields: readonly OriginalField[] = [],
     ) => {
+      // A previous screen's async callback must not edit the cache while a
+      // login is replacing it with the current cloud snapshot.
+      if (cloudRestorePendingRef.current) return;
       // React may defer or replay a state updater. Request durable storage
       // before setState rather than relying on it having run synchronously.
       // All table edits (history writes) use the immediate persistence path.
@@ -697,6 +706,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       let nextPresentForTelemetry: AppData | null = null;
 
       setState((prev) => {
+        if (cloudRestorePendingRef.current) return prev;
         const updated =
           typeof updater === "function"
             ? (updater as (p: AppData) => AppData)(prev.present)
@@ -747,8 +757,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   );
 
   const undo = useCallback(() => {
+    if (cloudRestorePendingRef.current) return;
     let didUndo = false;
     setState((prev) => {
+      if (cloudRestorePendingRef.current) return prev;
       if (prev.past.length === 0) return prev;
       const previous = prev.past[prev.past.length - 1];
       didUndo = true;
@@ -773,8 +785,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const redo = useCallback(() => {
+    if (cloudRestorePendingRef.current) return;
     let didRedo = false;
     setState((prev) => {
+      if (cloudRestorePendingRef.current) return prev;
       if (prev.future.length === 0) return prev;
       const next = prev.future[0];
       didRedo = true;
@@ -805,9 +819,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   // is available. This keeps the lookup result across report-month changes and
   // future uploads where a source file may be omitted.
   useEffect(() => {
-    if (isLoading || !needsHoldDerivedData) return;
+    if (isLoading || !needsHoldDerivedData || cloudRestorePendingRef.current) return;
 
     setState((prev) => {
+      if (cloudRestorePendingRef.current) return prev;
       const holdRows = prev.present.Hold_AE?.data || [];
       const { rows, updatedCount } = fillMissingHoldBankAccounts({
         holdRows,
@@ -883,6 +898,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   const actionsValue = useMemo<AppActionsCtx>(
     () => ({
+      setCloudRestorePending,
       applyCloudData,
       updateAppData,
       undo,
@@ -892,6 +908,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       isSyncing,
     }),
     [
+      setCloudRestorePending,
       applyCloudData,
       updateAppData,
       undo,

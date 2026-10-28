@@ -20,6 +20,7 @@ export interface SyncState {
   message?: string;
   conflicts?: string[];
   updatedAt?: string;
+  revision?: number;
 }
 export const OWNER_KEY = "payroll_cloud_cache_owner";
 const EMPTY: Manifest = { version: 1, fields: {} };
@@ -39,6 +40,8 @@ export class SyncEngine {
   private timer?: ReturnType<typeof setTimeout>;
   private conflictRemote: Workspace | null = null;
   private staged: Manifest | null = null;
+  // Bind checkpoints to this browser/device for the lifetime of the session.
+  private readonly storage = localStorage;
   constructor(
     private repository: CloudRepository,
     private getData: () => AppData,
@@ -47,7 +50,7 @@ export class SyncEngine {
     private backup: () => Promise<void>,
   ) {}
   private checkpoint() {
-    localStorage.setItem(
+    this.storage.setItem(
       checkpointKey(this.repository.owner),
       JSON.stringify({ base: this.base, dirty: [...this.dirty] }),
     );
@@ -71,7 +74,7 @@ export class SyncEngine {
     }
     if (this.stopped) return;
     this.applying = true;
-    // Preserve edits made while the download was in flight.
+    // Login installs an exact cloud snapshot; background pulls preserve live edits.
     try {
       await this.apply((current) => {
         const currentFields = current as unknown as Record<string, unknown>;
@@ -79,8 +82,14 @@ export class SyncEngine {
           ...(replace ? { ...INITIAL_APP_DATA, Timesheet_Roster: [] } : current),
         } as Record<string, unknown>;
         if (replace) {
-          for (const key of this.dirty) next[key] = currentFields[key];
+          for (const key of Object.keys(remote.manifest.fields)) {
+            // fields omitted from the download have a verified on-disk hash.
+            next[key] = Object.hasOwn(patch, key) ? patch[key] : before[key];
+            rememberCloudField(this.repository.owner, key, next[key], remote.manifest.fields[key].hash);
+          }
+          this.dirty.clear();
           this.refs = { ...next };
+          return next as unknown as AppData;
         }
         for (const key of fields) {
           if (!this.dirty.has(key) && currentFields[key] === before[key]) {
@@ -117,73 +126,68 @@ export class SyncEngine {
   }
   private async initialize() {
     this.initializing = true;
+    this.lastError = null;
     this.report({ status: "starting" });
     try {
-      const owner = localStorage.getItem(OWNER_KEY);
+      const owner = this.storage.getItem(OWNER_KEY);
       if (owner && owner !== this.repository.owner)
         throw new Error(
           "Máy này có dữ liệu của tài khoản khác. Đăng nhập lại tài khoản đã lưu dữ liệu để tránh trộn dữ liệu.",
         );
       const stored =
         owner === this.repository.owner
-          ? localStorage.getItem(checkpointKey(owner))
+          ? this.storage.getItem(checkpointKey(owner))
           : null;
       const checkpoint = stored ? JSON.parse(stored) : null;
       this.refs = { ...this.getData() };
       this.base = checkpoint?.base || null;
       this.dirty = new Set(checkpoint?.dirty || []);
       await this.repository.checkMembership();
-      const remote = await this.repository.read();
+      let remote = await this.repository.read();
       if (this.stopped) return;
-      if (checkpoint?.base) {
-        // A tab may have closed before IndexedDB finished writing a cloud pull.
-        // Restore clean fields, while keeping the baseline of pending offline edits.
-        if (remote) {
-          const clean = Object.keys(remote.manifest.fields).filter(
-            (key) => !this.dirty.has(key),
-          );
+      if (remote) {
+        // Every login takes the saved cloud version. Keep unsynced local work
+        // in a pinned backup; never replay an old device's dirty checkpoint.
+        if (this.dirty.size || !checkpoint?.base) await this.backup();
+        if (this.stopped) return;
+        for (let attempt = 0; attempt < 5; attempt++) {
           const current = this.getData() as unknown as Record<string, unknown>;
-          const missing = clean.filter(key => cachedFieldHash(this.repository.owner, key, current[key]) !== remote.manifest.fields[key].hash);
-          if (missing.length) await this.install(remote, missing);
-          const fields = { ...this.base!.manifest.fields };
-          for (const key of clean) {
-            if (!this.dirty.has(key)) fields[key] = remote.manifest.fields[key];
+          const missing = Object.keys(remote.manifest.fields).filter(
+            key => cachedFieldHash(this.repository.owner, key, current[key]) !== remote!.manifest.fields[key].hash,
+          );
+          await this.install(remote, missing, true);
+          if (this.stopped) return;
+          // Another computer may have saved while large tables downloaded.
+          // Do not unlock a stale or partially newer workspace as "synced".
+          const latest = await this.repository.read();
+          if (this.stopped) return;
+          if (!latest) throw new Error("Bản cloud vừa thay đổi. Bấm Đồng bộ ngay để tải lại.");
+          this.changed();
+          if (!this.dirty.size && latest.revision === remote.revision && sameManifest(latest.manifest, remote.manifest)) {
+            this.base = latest;
+            this.storage.setItem(OWNER_KEY, this.repository.owner);
+            this.ready = true;
+            this.checkpoint();
+            this.report({ status: "synced", updatedAt: latest.updated_at, revision: latest.revision });
+            return;
           }
-          this.base = { ...remote, manifest: { version: 1, fields } };
+          remote = latest;
         }
-      } else if (remote) {
-        // A first login on another computer restores the cloud; it never uploads defaults.
-        if (!owner || owner === this.repository.owner) await this.backup();
-        await this.install(remote, Object.keys(remote.manifest.fields), true);
-        this.base = remote;
-      } else if (owner && owner !== this.repository.owner) {
+        throw new Error("Dữ liệu cloud đang được cập nhật liên tục. Bấm Đồng bộ ngay để lấy bản mới nhất.");
+      } else if (checkpoint?.base) {
         throw new Error(
-          "Tài khoản này chưa có dữ liệu cloud. Đăng nhập lại tài khoản đã lưu dữ liệu trên máy.",
+          "Không tìm thấy bản cloud đã lưu. Bản trên máy được giữ nguyên; bấm Đồng bộ ngay để kiểm tra lại.",
         );
       } else {
+        // A genuinely new workspace can be seeded only after a successful read.
         Object.keys(this.getData()).forEach((key) => this.dirty.add(key));
       }
       if (this.stopped) return;
-      localStorage.setItem(OWNER_KEY, this.repository.owner);
+      this.storage.setItem(OWNER_KEY, this.repository.owner);
       this.ready = true;
       this.checkpoint();
       await this.sync();
     } catch (error) {
-      if (
-        !navigator.onLine &&
-        localStorage.getItem(OWNER_KEY) === this.repository.owner
-      ) {
-        const cached = localStorage.getItem(
-          checkpointKey(this.repository.owner),
-        );
-        if (cached) {
-          const checkpoint = JSON.parse(cached);
-          this.base = checkpoint.base;
-          this.refs = { ...this.getData() };
-          this.dirty = new Set(checkpoint.dirty || []);
-          this.ready = true;
-        }
-      }
       this.fail(error);
     } finally {
       this.initializing = false;
@@ -347,6 +351,7 @@ export class SyncEngine {
       this.report({
         status: this.dirty.size ? "saving" : "synced",
         updatedAt: committed?.updated_at,
+        revision: committed?.revision,
       });
     } catch (error) {
       if ((error as { code?: string })?.code === "P0002")

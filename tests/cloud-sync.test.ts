@@ -10,7 +10,7 @@ import {
 import { SyncEngine, OWNER_KEY } from "../src/app/lib/cloud/engine";
 import type { CloudRepository } from "../src/app/lib/cloud/repository";
 import type { AppData } from "../src/app/types";
-import { rememberCloudField, cachedFieldHash, cachedFieldHashes, restoreFieldHashes, persistedFieldHashes, withAppStorageLock } from "../src/app/lib/cloud/field-cache";
+import { rememberCloudField, cachedFieldHash, cachedFieldHashes, restoreFieldHashes, persistedFieldHashes, prepareHydrationTables, withAppStorageLock } from "../src/app/lib/cloud/field-cache";
 import { withDeadline } from "../src/app/lib/cloud/deadline";
 import { INITIAL_APP_DATA } from "../src/app/constants/initial-data";
 import { calculateReconciliationTotals, syncReportingMonthReconciliation } from "../src/app/lib/utils/reconciliation-sync";
@@ -96,7 +96,9 @@ function harness() {
   let online = true;
   let blockedUpload: { gate: Promise<void>; started: () => void } | null = null;
   let blockedDownload: { gate: Promise<void>; started: () => void } | null = null;
+  let rejectDownload = false;
   let rejectCommit = false;
+  let advanceRevisionOnRead = false;
   const repository = (owner = "owner") =>
     ({
       owner,
@@ -105,6 +107,7 @@ function harness() {
       async checkMembership() {},
       async read() {
         if (!online) throw new Error("offline test");
+        if (advanceRevisionOnRead && server) server = { ...server, revision: ++serial };
         return server ? structuredClone(server) : null;
       },
       async upload(value: unknown) {
@@ -120,6 +123,10 @@ function harness() {
       },
       async download(ref: { hash: string }) {
         downloads++;
+        if (rejectDownload) {
+          rejectDownload = false;
+          throw new Error("download test failed");
+        }
         if (blockedDownload) {
           const blocked = blockedDownload;
           blockedDownload = null;
@@ -150,6 +157,8 @@ function harness() {
     let notifyApply!: () => void;
     const applyStarted = new Promise<void>(resolve => { notifyApply = resolve; });
     const states: unknown[] = [];
+    const backups: Record<string, unknown>[] = [];
+    let rejectBackup = false;
     const engine = new SyncEngine(
       repository(),
       () => data as unknown as AppData,
@@ -166,11 +175,19 @@ function harness() {
         >;
       },
       (state) => states.push(state),
-      async () => {},
+      async () => {
+        if (rejectBackup) {
+          rejectBackup = false;
+          throw new Error("backup test failed");
+        }
+        backups.push(structuredClone(data));
+      },
     );
     return {
       engine,
       states,
+      backups,
+      failBackup() { rejectBackup = true; },
       applyStarted,
       get data() {
         return data;
@@ -193,6 +210,11 @@ function harness() {
     failCommit() {
       rejectCommit = true;
     },
+    failDownload() {
+      rejectDownload = true;
+    },
+    removeWorkspace() { server = null; },
+    setRevisionChurn(value: boolean) { advanceRevisionOnRead = value; },
     pauseUpload() {
       let release!: () => void, started!: () => void;
       const startedPromise = new Promise<void>((resolve) => {
@@ -330,7 +352,7 @@ test("different account cannot upload another account cached data", async () => 
   a.engine.stop();
 });
 
-test("offline edits survive reopening and upload when connection returns", async () => {
+test("reopening offline waits for cloud, then backs up pending local edits instead of uploading them", async () => {
   const h = harness();
   const first = h.client({ Q_Staff: ["saved"], Bank_North_AE: ["confirmed"] });
   await first.engine.start();
@@ -348,12 +370,15 @@ test("offline edits survive reopening and upload when connection returns", async
     "offline",
   );
   assert.equal(h.commits, 1);
+  assert.equal(reopened.backups.length, 0);
   h.setOnline(true);
   await reopened.engine.retry();
-  assert.equal(h.commits, 2);
+  assert.equal(h.commits, 1);
+  assert.deepEqual(reopened.data.Q_Staff, ["saved"]);
+  assert.deepEqual(reopened.backups[0].Q_Staff, ["offline edit"]);
   assert.equal(
     h.server?.manifest.fields.Q_Staff.hash,
-    JSON.stringify(["offline edit"]),
+    JSON.stringify(["saved"]),
   );
   reopened.engine.stop();
 });
@@ -507,7 +532,7 @@ test("an edit during a background pull is retained and a same-table cloud confli
   } finally { a.engine.stop(); b.engine.stop(); }
 });
 
-test("editing the owned cache during startup survives closing before the restore finishes", async () => {
+test("an interrupted login retries from cloud and backs up unconfirmed local cache changes", async () => {
   const h = harness();
   const first = h.client({ Hold_AE: { data: [{ amount: 1200 }] } });
   await first.engine.start();
@@ -524,9 +549,176 @@ test("editing the owned cache during startup survives closing before the restore
   try {
     await reopened.engine.start();
     await reopened.engine.flush();
-    assert.deepEqual(reopened.data.Hold_AE, { data: [{ amount: 5600 }] });
-    assert.equal(h.server?.manifest.fields.Hold_AE.hash, JSON.stringify({ data: [{ amount: 5600 }] }));
+    assert.deepEqual(reopened.data.Hold_AE, { data: [{ amount: 1200 }] });
+    assert.deepEqual(reopened.backups[0].Hold_AE, { data: [{ amount: 5600 }] });
+    assert.equal(h.server?.manifest.fields.Hold_AE.hash, JSON.stringify({ data: [{ amount: 1200 }] }));
+    assert.equal(h.commits, 1);
   } finally { reopened.engine.stop(); }
+});
+
+test("login replaces a dirty duplicate local table with the latest saved cloud snapshot", async () => {
+  const h = harness();
+  const row = { "Tháng báo cáo": "02.2026", "ID Number": "TEST", "TOTAL PAYMENT": 1200 };
+  const a = h.client({ Hold_AE: { data: [row] }, Sheet1_AE: { data: [row] } });
+  await a.engine.start();
+  h.resetDevice();
+  const b = h.client({ Hold_AE: { data: [] } });
+  await b.engine.start();
+  const latest = { data: [{ ...row, "TOTAL PAYMENT": 3400 }] };
+  a.edit("Hold_AE", latest);
+  await a.engine.flush();
+  b.edit("Hold_AE", { data: [row, row] });
+  b.edit("LocalOnly_Draft", ["unpublished"]);
+  b.engine.stop();
+  const reopened = h.client(structuredClone(b.data));
+  try {
+    await reopened.engine.start();
+    assert.deepEqual(reopened.data.Hold_AE, latest);
+    assert.equal(reopened.data.LocalOnly_Draft, undefined);
+    assert.deepEqual(reopened.backups[0].Hold_AE, { data: [row, row] });
+    assert.deepEqual(reopened.backups[0].LocalOnly_Draft, ["unpublished"]);
+    assert.equal((reopened.states.at(-1) as { status: string }).status, "synced");
+    await reopened.engine.flush();
+    assert.equal(h.commits, 2, "opening a stale device never publishes its cached rows");
+  } finally { a.engine.stop(); reopened.engine.stop(); }
+});
+
+test("login rechecks the cloud revision after downloading before reporting a current snapshot", async () => {
+  const h = harness();
+  const a = h.client({ Hold_AE: { data: [{ amount: 1200 }] }, BankExport: { data: [{ amount: 600 }] } });
+  await a.engine.start();
+  h.resetDevice();
+  const b = h.client({ Hold_AE: { data: [] }, BankExport: { data: [] } });
+  const blocked = h.pauseDownload();
+  const starting = b.engine.start();
+  await blocked.started;
+  assert.equal(b.states.some(state => (state as { status: string }).status === "synced"), false);
+  a.edit("Hold_AE", { data: [{ amount: 3400 }] });
+  a.edit("BankExport", { data: [{ amount: 900 }] });
+  await a.engine.flush();
+  blocked.release();
+  try {
+    await starting;
+    assert.deepEqual(b.data.Hold_AE, a.data.Hold_AE);
+    assert.deepEqual(b.data.BankExport, a.data.BankExport);
+    const synced = b.states.filter(state => (state as { status: string }).status === "synced") as { revision: number }[];
+    assert.equal(synced.length, 1);
+    assert.equal(synced[0].revision, h.server?.revision);
+    await b.engine.flush();
+    assert.equal(h.commits, 2);
+  } finally { a.engine.stop(); b.engine.stop(); }
+});
+
+test("repeated logins on three devices converge without appending rows or creating cloud revisions", async () => {
+  const h = harness();
+  const source = { Hold_AE: { data: [{ id: "H1", month: "02.2026" }] }, BankExport: { data: [{ id: "B1", month: "02.2026" }] } };
+  const first = h.client(structuredClone(source));
+  await first.engine.start();
+  first.engine.stop();
+  for (let device = 0; device < 3; device++) {
+    h.resetDevice();
+    let cache: Record<string, unknown> = { Hold_AE: { data: [] }, BankExport: { data: [] } };
+    for (let login = 0; login < 2; login++) {
+      const client = h.client(cache);
+      try {
+        await client.engine.start();
+        await client.engine.flush();
+        assert.deepEqual(client.data.Hold_AE, source.Hold_AE);
+        assert.deepEqual(client.data.BankExport, source.BankExport);
+        cache = structuredClone(client.data);
+      } finally { client.engine.stop(); }
+    }
+  }
+  assert.equal(h.commits, 1);
+});
+
+test("a failed login download never certifies stale cache and retry restores cloud without uploading", async () => {
+  const h = harness();
+  const first = h.client({ Hold_AE: { data: [{ amount: 1200 }] } });
+  await first.engine.start();
+  first.engine.stop();
+  const reopened = h.client({ Hold_AE: { data: [{ amount: 9999 }, { amount: 9999 }] } });
+  h.failDownload();
+  try {
+    await reopened.engine.start();
+    assert.equal((reopened.states.at(-1) as { status: string }).status, "error");
+    assert.equal(reopened.states.some(state => (state as { status: string }).status === "synced"), false);
+    await reopened.engine.retry();
+    assert.deepEqual(reopened.data.Hold_AE, first.data.Hold_AE);
+    assert.equal(h.commits, 1);
+  } finally { reopened.engine.stop(); }
+});
+
+test("edits made offline in an already restored session still save on reconnect", async () => {
+  const h = harness();
+  const client = h.client({ Hold_AE: { data: [{ amount: 1200 }] } });
+  await client.engine.start();
+  h.setOnline(false);
+  client.edit("Hold_AE", { data: [{ amount: 3400 }] });
+  await client.engine.sync();
+  assert.equal((client.states.at(-1) as { status: string }).status, "offline");
+  h.setOnline(true);
+  try {
+    await client.engine.flush();
+    assert.equal(h.commits, 2);
+    assert.equal(h.server?.manifest.fields.Hold_AE.hash, JSON.stringify({ data: [{ amount: 3400 }] }));
+  } finally { client.engine.stop(); }
+});
+
+test("a missing established cloud workspace cannot be recreated from an old device cache", async () => {
+  const h = harness();
+  const first = h.client({ Hold_AE: { data: [{ amount: 1200 }] } });
+  await first.engine.start();
+  first.engine.stop();
+  h.removeWorkspace();
+  const reopened = h.client(structuredClone(first.data));
+  try {
+    await reopened.engine.start();
+    assert.equal((reopened.states.at(-1) as { status: string }).status, "error");
+    await assert.rejects(reopened.engine.flush(), /Không tìm thấy bản cloud/);
+    assert.equal(h.server, null);
+    assert.equal(h.commits, 1);
+  } finally { reopened.engine.stop(); }
+});
+
+test("an unsynced cache is not replaced until its local backup succeeds", async () => {
+  const h = harness();
+  const first = h.client({ Hold_AE: { data: [{ amount: 1200 }] } });
+  await first.engine.start();
+  first.edit("Hold_AE", { data: [{ amount: 9999 }] });
+  first.engine.stop();
+  const reopened = h.client(structuredClone(first.data));
+  reopened.failBackup();
+  try {
+    await reopened.engine.start();
+    assert.deepEqual(reopened.data.Hold_AE, first.data.Hold_AE);
+    assert.equal((reopened.states.at(-1) as { status: string }).status, "error");
+    await reopened.engine.retry();
+    assert.deepEqual(reopened.backups[0].Hold_AE, first.data.Hold_AE);
+    assert.deepEqual(reopened.data.Hold_AE, { data: [{ amount: 1200 }] });
+    assert.equal(h.commits, 1);
+  } finally { reopened.engine.stop(); }
+});
+
+test("a constantly advancing cloud revision has a bounded login retry and never reports stale success", async () => {
+  const h = harness();
+  const first = h.client({ Hold_AE: { data: [{ amount: 1200 }] } });
+  await first.engine.start();
+  first.engine.stop();
+  h.resetDevice();
+  h.setRevisionChurn(true);
+  const next = h.client({ Hold_AE: { data: [] } });
+  try {
+    await next.engine.start();
+    assert.equal((next.states.at(-1) as { status: string }).status, "error");
+    assert.equal(next.states.some(state => (state as { status: string }).status === "synced"), false);
+    assert.equal(h.commits, 1);
+    h.setRevisionChurn(false);
+    await next.engine.retry();
+    assert.equal((next.states.at(-1) as { revision: number }).revision, h.server?.revision);
+    assert.equal((next.states.at(-1) as { status: string }).status, "synced");
+    assert.equal(h.commits, 1);
+  } finally { next.engine.stop(); }
 });
 
 test("saved hashes certify only the original value and account", () => {
@@ -537,6 +729,20 @@ test("saved hashes certify only the original value and account", () => {
   assert.equal(cachedFieldHash("owner", "Hold_AE", structuredClone(original)), undefined);
   rememberCloudField("owner", "globalMonth", "2026-10", "month-hash");
   assert.equal(cachedFieldHash("owner", "globalMonth", "2026-09"), undefined);
+});
+
+test("hydration migrations cannot certify changed payroll tables with an old cloud hash", () => {
+  const original = structuredClone(INITIAL_APP_DATA);
+  original.Sheet1_AE = { headers: ["TOTAL PAYMENT"], data: [{ "TOTAL PAYMENT": 1200 }] };
+  const hashes = { Sheet1_AE: "gross-v1", Timesheet_Roster: "roster-v1" };
+  restoreFieldHashes("owner", original, hashes);
+  const migrated = prepareHydrationTables(original);
+  migrated.Sheet1_AE.headers.push("Extra Summer Instructors");
+  migrated.Sheet1_AE.data.push({ "TOTAL PAYMENT": 3400 });
+  assert.equal(cachedFieldHash("owner", "Sheet1_AE", migrated.Sheet1_AE), undefined);
+  assert.deepEqual(original.Sheet1_AE, { headers: ["TOTAL PAYMENT"], data: [{ "TOTAL PAYMENT": 1200 }] });
+  assert.equal(migrated.Timesheet_Roster, original.Timesheet_Roster);
+  assert.equal(cachedFieldHash("owner", "Timesheet_Roster", migrated.Timesheet_Roster), "roster-v1");
 });
 
 test("a partial save or another tab's split data cannot be certified by stale hashes", () => {

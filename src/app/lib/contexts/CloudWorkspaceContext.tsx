@@ -29,6 +29,7 @@ interface CloudContextValue {
   authenticated: boolean;
 }
 const Context = createContext<CloudContextValue | null>(null);
+type WorkspaceUser = { id: string; email?: string };
 // This hook deliberately shares the same context as the provider.
 // eslint-disable-next-line react-refresh/only-export-components
 export function useCloudWorkspace() {
@@ -73,14 +74,14 @@ export function CloudSyncButton() {
   );
 }
 export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
-  const { rawAppData, isStorageHydrating, hasStoredData } = useAppDataOnly();
-  const { applyCloudData } = useAppActions();
+  const { rawAppData, isStorageHydrating } = useAppDataOnly();
+  const { applyCloudData, setCloudRestorePending } = useAppActions();
   const dataRef = useRef(rawAppData);
   useLayoutEffect(() => {
     dataRef.current = rawAppData;
   }, [rawAppData]);
   const engine = useRef<SyncEngine | null>(null);
-  const [user, setUser] = useState<{ id: string; email?: string } | null>(null);
+  const [user, setUser] = useState<WorkspaceUser | null>(null);
   const [authReady, setAuthReady] = useState(() => !isSupabaseConfigured());
   const [state, setState] = useState<SyncState>(() =>
     isSupabaseConfigured()
@@ -92,24 +93,28 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [unlockedOwner, setUnlockedOwner] = useState<string | null>(null);
+  // Identity is retained for token refresh, but a logout/login gets a fresh
+  // object even for the same account and must restore cloud again.
+  const [unlockedUser, setUnlockedUser] = useState<WorkspaceUser | null>(null);
   useEffect(() => {
     if (!isSupabaseConfigured()) return;
     let alive = true;
+    let receivedAuthEvent = false;
     withDeadline(() => supabase.auth.getSession(), "Kiểm tra đăng nhập quá lâu. Tải lại trang để thử lại.").then(({ data, error }) => {
-      if (alive) {
+      if (alive && !receivedAuthEvent) {
         setUser(previous => previous?.id === data.session?.user.id ? previous : data.session?.user || null);
         setAuthReady(true);
         if (error) setLoginError(error.message);
       }
     }).catch(error => {
-      if (!alive) return;
+      if (!alive || receivedAuthEvent) return;
       setAuthReady(true);
       setState({ status: "error", message: error instanceof Error ? error.message : "Không thể kiểm tra đăng nhập." });
       setLoginError(error instanceof Error ? error.message : "Không thể kiểm tra đăng nhập.");
     });
     const { data } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!alive) return;
+      receivedAuthEvent = true;
       // The callback only updates React state; network calls run in the effect below.
       setUser((previous) =>
         previous?.id === session?.user.id ? previous : session?.user || null,
@@ -130,20 +135,13 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
       applyCloudData,
       (next) => {
         if (alive) {
-          setState(previous => previous.status === next.status && previous.message === next.message && previous.updatedAt === next.updatedAt && previous.conflicts === next.conflicts ? previous : next);
-          if (
-            next.status === "synced" ||
-            next.status === "saving" ||
-            next.status === "conflict" ||
-            (next.status === "offline" &&
-              localStorage.getItem(OWNER_KEY) === user.id)
-          )
-            setUnlockedOwner(user.id);
+          setState(previous => previous.status === next.status && previous.message === next.message && previous.updatedAt === next.updatedAt && previous.revision === next.revision && previous.conflicts === next.conflicts ? previous : next);
+          if (next.status === "synced") setUnlockedUser(user);
         }
       },
       async () => {
         await saveSnapshot(dataRef.current, {
-          title: "Bản máy trước đồng bộ cloud",
+          title: "Bản máy chưa đồng bộ trước khi tải cloud",
           trigger: "restore",
           isPinned: true,
         });
@@ -179,10 +177,13 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
   const configured = isSupabaseConfigured();
   const owned = localStorage.getItem(OWNER_KEY);
-  const hasOwnCache = !!user && owned === user.id && !isStorageHydrating && hasStoredData;
   const gated =
     configured &&
-    (!authReady || (!!user && unlockedOwner !== user.id && !hasOwnCache) || (!!owned && !user));
+    (!authReady || isStorageHydrating || (!!user && unlockedUser !== user) || (!!owned && !user));
+  useLayoutEffect(() => {
+    setCloudRestorePending(gated);
+    return () => setCloudRestorePending(false);
+  }, [gated, setCloudRestorePending]);
   const showDialog = dialogOpen || (authReady && gated);
   const [mode, setMode] = useState<"login" | "signup">("login");
 
@@ -202,10 +203,11 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
         });
         if (error) throw error;
         if (signUpData.user) {
-          setUser(signUpData.user);
           if (!signUpData.session) {
             setLoginError("Đã gửi email xác nhận. Vui lòng kiểm tra hộp thư để xác nhận tài khoản nếu cần thiết.");
           } else {
+            const signedIn = signUpData.user;
+            setUser(previous => previous?.id === signedIn.id ? previous : signedIn);
             setDialogOpen(false);
           }
         }
@@ -214,7 +216,7 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
           { email: email.trim(), password },
         );
         if (error) throw error;
-        setUser(loginData.user);
+        setUser(previous => previous?.id === loginData.user.id ? previous : loginData.user);
         setDialogOpen(false);
       }
     } catch (error) {
@@ -240,7 +242,7 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
     <Context.Provider value={contextValue}>
       {gated ? (
         <div className="flex min-h-screen items-center justify-center text-sm text-muted-foreground">
-          {!authReady ? "Đang kiểm tra đăng nhập…" : "Mở dữ liệu đồng bộ"}
+          {!authReady ? "Đang kiểm tra đăng nhập…" : "Đang chờ bản cloud mới nhất…"}
         </div>
       ) : (
         children
@@ -258,8 +260,9 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
         >
           <DialogTitle>Đồng bộ giữa các máy</DialogTitle>
           <DialogDescription>
-            Dùng cùng tài khoản trên các máy để mở dữ liệu lương và các tháng đã
-            lưu. Tự đồng bộ sau khi đăng nhập.
+            Dùng cùng tài khoản trên các máy. Mỗi lần đăng nhập, ứng dụng tải bản
+            cloud mới nhất trước khi mở các bảng. Thay đổi trên máy chưa đồng bộ
+            được giữ trong bản sao lưu riêng.
           </DialogDescription>
           {!user ? (
             <form onSubmit={handleSubmit} className="space-y-3">
@@ -322,20 +325,6 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
                   </button>
                 )}
               </div>
-              {owned && (
-                <div className="pt-2 text-center border-t border-border/50">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      localStorage.removeItem(OWNER_KEY);
-                      setDialogOpen(false);
-                    }}
-                    className="text-xs text-muted-foreground hover:text-foreground underline cursor-pointer"
-                  >
-                    Bỏ qua phiên tài khoản cũ và tiếp tục dùng trên máy
-                  </button>
-                </div>
-              )}
             </form>
           ) : (
             <div className="space-y-3 text-sm">
@@ -348,6 +337,16 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
                 <p className="text-xs text-muted-foreground">
                   Lần lưu cloud:{" "}
                   {new Date(state.updatedAt).toLocaleString("vi-VN")}
+                </p>
+              )}
+              {state.revision !== undefined && (
+                <p className="text-xs text-muted-foreground">
+                  Phiên bản dữ liệu cloud: #{state.revision}
+                </p>
+              )}
+              {gated && (state.status === "error" || state.status === "offline") && (
+                <p className="text-xs text-muted-foreground">
+                  Kết nối mạng rồi bấm Đồng bộ ngay để mở bản cloud mới nhất.
                 </p>
               )}
               {state.status === "conflict" ? (

@@ -1,10 +1,27 @@
 import type { Manifest } from "./protocol";
+import type { AppData } from "../../types";
 
 export const CLOUD_HASHES_KEY = "PayrollApp_Data:cloudHashes";
 export const CLOUD_CACHE_EVENT = "payroll-cloud-cache-updated";
 export interface StoredCloudHashes {
   owner: string;
   hashes: Record<string, string>;
+}
+
+/** Legacy hydration mutates these table containers/arrays in place. Detach
+ * them after registering cached hashes so a migration cannot retain old proof.
+ * Large split collections keep their immutable references and cache stamps. */
+export function prepareHydrationTables(data: AppData): AppData {
+  const prepared = { ...data };
+  for (const field of ["Hold_AE", "Sheet1_AE", "Bank_North_AE", "SoSanh_AE"] as const) {
+    const table = data[field];
+    if (table) prepared[field] = {
+      ...table,
+      headers: [...(table.headers || [])],
+      data: [...(table.data || [])],
+    };
+  }
+  return prepared;
 }
 
 // Serialize readers/writers from other tabs too. The hash stamp is invalidated
