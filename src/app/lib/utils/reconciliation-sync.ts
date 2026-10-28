@@ -8,6 +8,7 @@ import {
 } from "./data-utils";
 import { classifyHoldOperation, parseMonthPeriod } from "./bulk-payment-analytics";
 import { markTransactionGenerated } from "./transaction-activity";
+import { withTransactionMonthOriginal } from "./transaction-originals";
 
 export interface ReconciliationTotals {
   actual: number;
@@ -430,7 +431,7 @@ export function syncReportingMonthReconciliation(
     ? existing.activity
     : markTransactionGenerated(appData, generatedAt);
 
-  return {
+  const next: AppData = {
     ...appData,
     globalMonth: month,
     BankExport: table,
@@ -445,4 +446,5 @@ export function syncReportingMonthReconciliation(
     TransactionActivity: activity,
     updatedAt: generatedAt,
   };
+  return keepExisting ? next : withTransactionMonthOriginal(next, period, table);
 }

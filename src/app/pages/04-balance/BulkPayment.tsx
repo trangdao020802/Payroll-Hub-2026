@@ -38,6 +38,7 @@ import {
   Eye,
   Menu,
   Filter,
+  FilterX,
   Check,
   ArrowLeft,
   ArrowRight,
@@ -109,7 +110,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select";
-import { DataTable, isAhpBuValue } from "../../components/DataTable";
+import { DataTable, isAhpBuValue, type DataTableRef } from "../../components/DataTable";
 import { BulkPaymentAnalytics } from "./components/BulkPaymentAnalytics";
 import { buildBulkPaymentAnalytics } from "../../lib/utils/bulk-payment-analytics";
 import { markTransactionSaved } from "../../lib/utils/transaction-activity";
@@ -305,6 +306,23 @@ export function BulkPayment({
       ? externalOnSearchTermChange
       : setInternalSearchTerm;
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const transactionTableRef = React.useRef<DataTableRef>(null);
+  const [transactionHasFilters, setTransactionHasFilters] = useState(false);
+  const handleClearTransactionFilters = useCallback(() => {
+    setSearchTerm("");
+    setDebouncedSearch("");
+    transactionTableRef.current?.clearAllFilters();
+    setTransactionHasFilters(false);
+  }, [setSearchTerm]);
+  const handleResetTransactionMonth = useCallback(() => {
+    if (handleRefresh()) handleClearTransactionFilters();
+  }, [handleRefresh, handleClearTransactionFilters]);
+  const transactionSearchMonthRef = React.useRef(globalMonth);
+  useEffect(() => {
+    if (transactionSearchMonthRef.current === globalMonth) return;
+    transactionSearchMonthRef.current = globalMonth;
+    handleClearTransactionFilters();
+  }, [globalMonth, handleClearTransactionFilters]);
   const [internalShowLeftCard, setInternalShowLeftCard] = useState(true);
   const [showClearDialog, setShowClearDialog] = useState(false);
   const [deleteConfirmTarget, setDeleteConfirmTarget] = useState<{
@@ -719,8 +737,9 @@ export function BulkPayment({
   const handleApplyTransactionHistoryVersions = useCallback(
     (versions: TransactionVersion[]) => {
       updateAppData((prev) => applyLocalTransactionVersions(prev, versions), true, true);
+      if (versions.length) handleClearTransactionFilters();
     },
-    [updateAppData],
+    [updateAppData, handleClearTransactionFilters],
   );
 
   const displayBankExportData = useMemo(() => {
@@ -729,7 +748,7 @@ export function BulkPayment({
     const holdRows = appData.Hold_AE?.data || [];
 
     return rows.map((row: any) => {
-      const canonical = withCanonicalTransactionDocumentId(row);
+      const canonical = {...withCanonicalTransactionDocumentId(row)};
       if (!canonical.BU && !canonical.Business) {
         let bu = String(row["_fileBank"] || row["Business"] || row["BU"] || "").trim();
         if (!bu) {
@@ -3147,7 +3166,13 @@ export function BulkPayment({
                 align="end"
                 className="w-60"
               >
-                <TableRestoreButton placement="menu" onRestore={rightPanelTab === "table" ? handleRefresh : () => updateAppData(prev => ({ ...prev }), false)} />
+                {rightPanelTab === "table" && (
+                  <TableRestoreButton
+                    placement="menu"
+                    onRestore={handleResetTransactionMonth}
+                    title={`Khôi phục Batch Payment đúng tháng ${globalMonth} trước chỉnh sửa. Giữ nguyên các tháng khác. Dùng Bỏ lọc nếu chỉ cần hiển thị lại toàn bộ dòng.`}
+                  />
+                )}
                 <DropdownMenuItem
                   onClick={() =>
                     window.dispatchEvent(new Event("open-ui-settings"))
@@ -3310,7 +3335,42 @@ export function BulkPayment({
                     overflow: "hidden",
                   }}
                 >
+                  <div className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-1.5 shrink-0">
+                    <label htmlFor="batch-payment-search" className="sr-only">Tìm kiếm Batch Payment</label>
+                    <div className="relative min-w-40 flex-1 max-w-sm">
+                      <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+                      <input
+                        id="batch-payment-search"
+                        type="search"
+                        value={searchTerm}
+                        onChange={(event) => setSearchTerm(event.target.value)}
+                        placeholder="Tên, STK, Document ID…"
+                        className="h-8 w-full rounded-full border border-border bg-background pl-8 pr-3 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSearchTerm("")}
+                      disabled={!searchTerm}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-border px-3 text-xs font-semibold whitespace-nowrap text-foreground hover:bg-muted active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Xóa nội dung tìm kiếm Batch Payment, giữ bộ lọc cột"
+                    >
+                      <X className="h-3.5 w-3.5" aria-hidden="true" />
+                      Bỏ tìm kiếm
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleClearTransactionFilters}
+                      disabled={!searchTerm && !transactionHasFilters}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-border px-3 text-xs font-semibold whitespace-nowrap text-foreground hover:bg-muted active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Xóa tất cả bộ lọc cột và tìm kiếm; hiển thị toàn bộ Batch Payment, giữ nguyên dữ liệu và tháng"
+                    >
+                      <FilterX className="h-3.5 w-3.5" aria-hidden="true" />
+                      Bỏ lọc
+                    </button>
+                  </div>
                   <DataTable
+                    ref={transactionTableRef}
                     columns={columns}
                     data={displayBankExportData}
                     onCellChange={handleCellChange}
@@ -3319,6 +3379,7 @@ export function BulkPayment({
                     isEditable={true}
                     externalSearchTerm={searchTerm}
                     onExternalSearchChange={setSearchTerm}
+                    onColumnFiltersChange={setTransactionHasFilters}
                     storageKey="bulk_payment"
                     alwaysHiddenColumns={useMemoHiddenBuColumns}
                     hideBuFilter

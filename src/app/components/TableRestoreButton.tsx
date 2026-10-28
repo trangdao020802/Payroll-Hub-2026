@@ -3,10 +3,10 @@ import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuIte
 import { useTableRestore } from '../hooks/useTableRestore';
 import type { OriginalField } from '../lib/utils/table-originals';
 
-export function TableRestoreButton({ fields, onRestore, placement = 'settings' }: { fields?: readonly OriginalField[]; onRestore?: () => void; placement?: 'settings' | 'menu' | 'plain' }) {
+export function TableRestoreButton({ fields, onRestore, placement = 'settings', title: customTitle }: { fields?: readonly OriginalField[]; onRestore?: () => void; placement?: 'settings' | 'menu' | 'plain'; title?: string }) {
   const restore = useTableRestore();
   const action = onRestore || (() => restore(fields || []));
-  const title = onRestore ? 'Tính lại bảng từ dữ liệu nguồn, bỏ chỉnh sửa riêng của bảng.' : 'Khôi phục toàn bộ dữ liệu của bảng trước chỉnh sửa (tất cả tháng), gồm dòng đã thêm hoặc xóa. Có thể Hoàn tác.';
+  const title = customTitle || (onRestore ? 'Tính lại bảng từ dữ liệu nguồn, bỏ chỉnh sửa riêng của bảng.' : 'Khôi phục toàn bộ dữ liệu của bảng trước chỉnh sửa (tất cả tháng), gồm dòng đã thêm hoặc xóa. Có thể Hoàn tác.');
   const content = <><RefreshCw className="h-3.5 w-3.5 shrink-0" /><span className="truncate flex-1 text-left font-semibold">Reset to default</span></>;
   const className = 'flex w-full items-center gap-2 whitespace-nowrap rounded-lg px-3 py-2 text-xs text-primary hover:bg-muted cursor-pointer';
   if (placement === 'plain') return <button type="button" onClick={action} title={title} className={className}>{content}</button>;

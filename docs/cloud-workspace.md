@@ -47,3 +47,36 @@ The owner requested that different computers always open the same latest saved c
 The server format, membership checks, owner isolation, private bucket, 200 MB limit, normal in-session edits and compare-and-swap conflict protection remain compatible. No database migration or production payroll rewrite is needed. This change does not deduplicate legitimate rows already present in a source workbook; login and restore never concatenate them.
 
 Verification: all 350 tests pass, including dirty duplicate cache replacement with backup, repeated logins across three independent device stores without new cloud revisions, a cloud save during login download, failed downloads/backups, offline reopening and reconnect, bounded revision churn, a missing established workspace, and hydration hash integrity. Typecheck, production build and ESLint on changed files pass. Automated cases use test clients and a local test database; verification of the owner's signed-in session on physical computers remains an acceptance check.
+
+### 2026-10-28: Batch Payment filters and month-safe Reset
+
+A Reconcile drilldown left a hidden search active in Batch Payment, leading the
+owner to use a data reset to show every row. The old Reset restored a single
+global BankExport original, which could belong to the previous month, without
+updating the active month cache or reconciliation activity.
+
+Batch Payment now exposes search, search clearing and complete filter clearing.
+The complete clear also resets debounced column/search inputs and pagination.
+Verified monthly identity corrections and month navigation clear stale queries.
+Display-only BU enrichment clones rows instead of mutating saved payroll during
+render, protecting immutable cache/hash ownership.
+
+Batch Payment originals are stored by normalized year/month inside the existing
+TableOriginals cloud field. Generated months and verified monthly cloud loads
+establish their own baselines; subsequent edits retain them. Legacy originals
+are usable only for explicitly matching rows. Reset cannot fall back to another
+month or guess the month of unlabelled payroll. Successful Reset changes the
+selected working month, its activity/cache and reconciliation total together,
+preserves other month snapshots/source tables, and discards its stale cell draft.
+The separate monthly history still requires **Lưu tháng**. No production data
+repair, database migration or automatic historical payroll rewrite is included.
+
+Verification: 360 tests pass with `TZ=Asia/Ho_Chi_Minh npm test`, including the
+actual Batch Payment search/clear callbacks with a table boundary, immutable
+display rows, legacy wrong-month rejection, month/year navigation, empty months,
+verified ID/account baselines, and repeated Reset without appended rows.
+Typecheck, production build and focused ESLint pass (three existing warnings).
+The host default `America/Sao_Paulo` exposes one existing Timesheet coverage
+date-boundary test failure; it reproduces unchanged at parent `1c47e66`.
+Automated cases use synthetic payroll and the local test database, without
+changing the owner's production payroll.

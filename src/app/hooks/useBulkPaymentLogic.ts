@@ -1103,7 +1103,11 @@ export function useBulkPaymentLogic() {
     setTransactionDraft(null);
   }, [activeTransactionDraft, updateAppData]);
 
-  const handleRefresh = useCallback(() => restoreTable(["BankExport"]), [restoreTable]);
+  const handleRefresh = useCallback(() => {
+    const restored = restoreTable(["BankExport"]);
+    if (restored) setTransactionDraft(null);
+    return restored;
+  }, [restoreTable]);
 
   // 9. TEXT REPORT FORMATTERS & COPY FUNCTIONS
   const generateAllSummaryText = useCallback(() => {

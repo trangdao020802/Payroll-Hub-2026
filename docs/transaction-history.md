@@ -44,6 +44,18 @@ Do not relax these restrictions to resolve login or setup errors.
 - The full month's Transaction is saved, independent of display filters.
   Total/subtotal rows are excluded. Missing or invalid row months block saving
   and checking; valid rows from other months are excluded.
+- Batch Payment has a visible search field, **Bỏ tìm kiếm** (search only) and
+  **Bỏ lọc** (all column filters and search, returning to page 1). These actions
+  never change payroll values. A verified month/identity load clears the old
+  drilldown query; changing reporting month clears the previous month's filters.
+- **Reset to default** restores only the selected month's pre-edit Batch Payment.
+  Originals are retained by normalized year/month, and verified cloud month or
+  identity resolutions establish that month's new baseline. A legacy original
+  from another month, or one with no provable month, cannot be restored. Reset
+  keeps other months and source tables unchanged, updates the selected working
+  month cache, activity and reconciliation total together, and discards the
+  current cell draft after success. Use **Lưu tháng** to publish a data reset to
+  the separate monthly history. Use **Bỏ lọc** when only the display is restricted.
 - After **Lưu sửa**, automatic month reconciliation retains the complete edited
   Transaction instead of rebuilding it from Bank AE. Local monthly snapshots
   preserve the rows and save activity when switching months or reopening the app.

@@ -2553,9 +2553,13 @@ export const DataTable = React.forwardRef<DataTableRef, DataTableProps>(
     const clearAllFilters = () => {
       setIndividualOverlap(null);
       setColumnFilters({});
+      setInputColumnFilters({});
+      setDebouncedColumnFilters({});
       setBuFilterMode("ALL");
       setInternalSearchTerm("");
+      setDebouncedSearchTerm("");
       if (onExternalSearchChange) onExternalSearchChange("");
+      setCurrentPage(1);
       showStatus("Đã xóa tất cả bộ lọc");
     };
 

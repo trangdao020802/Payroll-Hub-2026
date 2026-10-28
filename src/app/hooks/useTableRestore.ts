@@ -9,9 +9,13 @@ export function useTableRestore() {
     try {
       restoreTableOriginals(appData, fields);
       updateAppData(prev => restoreTableOriginals(prev, fields), true, true);
-      toast.success('Đã khôi phục dữ liệu trước chỉnh sửa của bảng.');
+      toast.success(fields.includes('BankExport')
+        ? `Đã khôi phục Batch Payment tháng ${appData.globalMonth}. Bấm Lưu tháng để cập nhật lịch sử Check STK & ID.`
+        : 'Đã khôi phục dữ liệu trước chỉnh sửa của bảng.');
+      return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Không thể khôi phục dữ liệu.');
+      return false;
     }
   }, [appData, updateAppData]);
 }

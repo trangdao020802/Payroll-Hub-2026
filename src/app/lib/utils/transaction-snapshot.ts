@@ -1,5 +1,6 @@
 import type { AppData } from '../../types';
 import { normalizePeriod, selectPeriodRows, type TransactionRow } from './transaction-history';
+import { withTransactionMonthOriginal } from './transaction-originals';
 
 export interface TransactionSnapshotLike {
   period: string;
@@ -131,6 +132,7 @@ export function replaceTransactionSnapshotsInAppData(
   const months = {...(appData.TransactionMonthCache?.months || {})};
   let bankExport = appData.BankExport;
   let transactionActivity = appData.TransactionActivity;
+  let originals = appData;
 
   for (const [period, rows] of normalized) {
     const existing = months[period];
@@ -140,6 +142,7 @@ export function replaceTransactionSnapshotsInAppData(
     );
     const table = {...(existing?.table ?? appData.BankExport), data: rows};
     months[period] = {table, activity};
+    originals = withTransactionMonthOriginal(originals, period, table);
     if (period === currentPeriod) {
       bankExport = table;
       transactionActivity = activity;
@@ -148,6 +151,7 @@ export function replaceTransactionSnapshotsInAppData(
 
   return {
     ...appData,
+    TableOriginals: originals.TableOriginals,
     BankExport: bankExport,
     TransactionActivity: transactionActivity,
     TransactionMonthCache: {

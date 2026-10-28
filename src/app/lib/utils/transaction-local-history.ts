@@ -3,6 +3,7 @@ import type { TransactionCheckSource, TransactionVersion } from '../transaction-
 import { markTransactionSaved } from './transaction-activity';
 import { normalizePeriod, selectPeriodRows, type TransactionRow } from './transaction-history';
 import { replaceTransactionPeriod, sameTransactionSnapshot } from './transaction-snapshot';
+import { withTransactionMonthOriginal } from './transaction-originals';
 
 export type LocalTransactionMonths = NonNullable<AppData['TransactionMonthCache']>['months'];
 
@@ -40,6 +41,7 @@ export function applyLocalTransactionVersions(
   const months = {...appData.TransactionMonthCache?.months};
   let table = appData.BankExport;
   let activity = appData.TransactionActivity;
+  let originals = appData;
   for (const version of versions) {
     const period = normalizePeriod(version.period.slice(0, 7));
     const selected = selectPeriodRows(version.rows, period);
@@ -53,6 +55,7 @@ export function applyLocalTransactionVersions(
       table: {...(existing?.table || appData.BankExport), data: selected},
       activity: nextActivity,
     };
+    originals = withTransactionMonthOriginal(originals, period, months[period].table);
     if (period === activePeriod) {
       table = {...table, data: replaceTransactionPeriod(table.data, period, selected)};
       activity = nextActivity;
@@ -60,6 +63,7 @@ export function applyLocalTransactionVersions(
   }
   return {
     ...appData,
+    TableOriginals: originals.TableOriginals,
     BankExport: table,
     TransactionActivity: activity,
     TransactionMonthCache: {activePeriod, months},
