@@ -12,6 +12,8 @@ import type { CloudRepository } from "../src/app/lib/cloud/repository";
 import type { AppData } from "../src/app/types";
 import { rememberCloudField, cachedFieldHash, cachedFieldHashes, restoreFieldHashes, persistedFieldHashes, withAppStorageLock } from "../src/app/lib/cloud/field-cache";
 import { withDeadline } from "../src/app/lib/cloud/deadline";
+import { INITIAL_APP_DATA } from "../src/app/constants/initial-data";
+import { calculateReconciliationTotals, syncReportingMonthReconciliation } from "../src/app/lib/utils/reconciliation-sync";
 const asset = (hash: string) => ({ hash, bytes: 10, parts: [hash] });
 const manifest = (fields: Record<string, string>): Manifest => ({
   version: 1,
@@ -252,6 +254,48 @@ test("second device restores cloud instead of uploading its empty defaults, then
   assert.deepEqual(second.data.Q_Staff, ["teacher", "new"]);
   first.engine.stop();
   second.engine.stop();
+});
+
+test("a fresh device restores every retained payroll month and keeps real discrepancies visible", async () => {
+  const h = harness();
+  const periods = Array.from({ length: 9 }, (_, index) => `${String(index + 1).padStart(2, "0")}.2026`);
+  const source: AppData = {
+    ...structuredClone(INITIAL_APP_DATA),
+    globalMonth: "10.2026",
+    Sheet1_AE: { headers: [], data: periods.map(month => ({
+      "Tháng báo cáo": month, "ID Number": `TEST-${month}`, "TOTAL PAYMENT": 700_595_349,
+    })) },
+    BankExport: { headers: [], data: [] },
+    TransactionMonthCache: {
+      activePeriod: "2026-10",
+      months: Object.fromEntries(periods.map((month, index) => [`2026-${month.slice(0, 2)}`, {
+        table: { headers: [], data: [{ "Tháng báo cáo": month, "Payment Amount": 700_595_349 + (index === 8 ? 7 : 0) }] },
+        // Older cloud saves have no activity marker; later ones retain generated previews.
+        activity: index % 2 ? { lastAction: "generated", saveVersion: 0, editCount: 0 } : undefined,
+      }])),
+    },
+  };
+  const first = h.client({ ...source });
+  await first.engine.start();
+  await first.engine.flush();
+  first.engine.stop();
+  h.resetDevice();
+  const second = h.client({ ...structuredClone(INITIAL_APP_DATA) });
+  try {
+    await second.engine.start();
+    assert.equal(h.commits, 1, "a fresh computer must not upload its defaults");
+    const restored = await decode(await encode(second.data)) as AppData;
+    for (const [index, month] of periods.entries()) {
+      const expectedVariance = index === 8 ? 7 : 0;
+      assert.equal(calculateReconciliationTotals(restored, month).variance, expectedVariance);
+      const opened = syncReportingMonthReconciliation(restored, month);
+      assert.equal(calculateReconciliationTotals(opened).variance, expectedVariance);
+    }
+    await second.engine.flush();
+    assert.equal(h.commits, 1, "viewing restored totals does not rewrite cloud payroll");
+  } finally {
+    second.engine.stop();
+  }
 });
 test("two devices preserve nonoverlapping tables and pause overlapping edits", async () => {
   const h = harness();

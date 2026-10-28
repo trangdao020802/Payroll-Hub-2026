@@ -36,6 +36,7 @@ export function useCloudWorkspace() {
 }
 export function CloudSyncButton() {
   const cloud = useContext(Context);
+  if (!cloud) return null;
   const configured = isSupabaseConfigured();
   const label = !configured
     ? "Chưa kết nối Cloud"

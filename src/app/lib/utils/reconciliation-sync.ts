@@ -54,7 +54,7 @@ function holdRowMatchesReportMonth(row: any, reportMonth: string): boolean {
   );
 }
 
-function bankRowMatchesReportMonth(row: any, reportMonth: string): boolean {
+function bankRowMatchesReportMonth(row: any, reportMonth: string, allowMissing = true): boolean {
   const target = parseMonthPeriod(reportMonth);
   if (!target) return false;
   const fileMonth = String(row?._fileMonth ?? "").trim();
@@ -75,7 +75,7 @@ function bankRowMatchesReportMonth(row: any, reportMonth: string): boolean {
       "Report Month",
     ]),
     reportMonth,
-    true,
+    allowMissing,
   );
 }
 
@@ -118,8 +118,9 @@ export function getDeductionContribution(row: any, reportMonth: string): number 
 export function getReconciliationActualSource(
   appData: ReconciliationSource,
   reportMonth: string,
-) {
+): { rows: any[]; confirmed: boolean; allowMissingMonth?: boolean } {
   const target = parseMonthPeriod(reportMonth);
+  if (!target) return { rows: [], confirmed: false };
   const active = parseMonthPeriod(
     appData.TransactionMonthCache?.activePeriod ||
       appData.globalMonth ||
@@ -133,9 +134,7 @@ export function getReconciliationActualSource(
   ) {
     return { rows: appData.BankExport.data, confirmed: true };
   }
-  const cached = target
-    ? appData.TransactionMonthCache?.months[target.key]
-    : undefined;
+  const cached = appData.TransactionMonthCache?.months[target.key];
   if (cached?.activity?.lastAction === "saved")
     return { rows: cached.table.data, confirmed: true };
 
@@ -144,12 +143,26 @@ export function getReconciliationActualSource(
     return { rows: bankNorthRows, confirmed: false };
   }
 
-  // Fallback: If Bank_North_AE has no matching rows for this month, but BankExport has rows, use BankExport
-  if (appData.BankExport?.data?.length) {
-    return { rows: appData.BankExport.data, confirmed: false };
+  // A retained month can outlive its imported Bank AE file. Restore its rows
+  // even for older snapshots without activity metadata, without promoting a
+  // generated/edited preview to confirmed payment or overriding a bank source.
+  if (cached) return { rows: cached.table.data, confirmed: false };
+
+  // Unlabelled rows belong only to the active period. An empty current table
+  // or a payment from another month cannot substitute for a retained month.
+  const currentRows = appData.BankExport?.data || [];
+  const allowMissingMonth = active?.key === target.key;
+  if (currentRows.some(row =>
+    matchesMonthValue(
+      readFirst(row, ["Tháng báo cáo", "_fileMonth", "Tháng", "Month"]),
+      reportMonth,
+      allowMissingMonth,
+    ),
+  )) {
+    return { rows: currentRows, confirmed: false, allowMissingMonth };
   }
 
-  return { rows: bankNorthRows, confirmed: false };
+  return { rows: [], confirmed: false };
 }
 
 function sumReconciliationActual(
@@ -164,7 +177,7 @@ function sumReconciliationActual(
           reportMonth,
           true,
         )
-      : bankRowMatchesReportMonth(row, reportMonth);
+      : bankRowMatchesReportMonth(row, reportMonth, source.allowMissingMonth);
     if (!matches) return sum;
     return (
       sum +
@@ -246,6 +259,7 @@ export function createReconciliationTotalsCalculator(reportMonth: string) {
   let grossSource: ReconciliationSource["Sheet1_AE"];
   let actualRows: AppData["BankExport"]["data"] | undefined;
   let actualConfirmed: boolean | undefined;
+  let actualAllowMissingMonth: boolean | undefined;
   let grossPayTotal = 0;
   let actual = 0;
   const contributions = new WeakMap<object, number>();
@@ -255,9 +269,10 @@ export function createReconciliationTotalsCalculator(reportMonth: string) {
       grossPayTotal = calculateReconciliationTotals({ Sheet1_AE: grossSource, Hold_AE: emptyTable, Bank_North_AE: emptyTable }, reportMonth).grossPayTotal;
     }
     const source = getReconciliationActualSource(appData, reportMonth);
-    if (actualRows !== source.rows || actualConfirmed !== source.confirmed) {
+    if (actualRows !== source.rows || actualConfirmed !== source.confirmed || actualAllowMissingMonth !== source.allowMissingMonth) {
       actualRows = source.rows;
       actualConfirmed = source.confirmed;
+      actualAllowMissingMonth = source.allowMissingMonth;
       actual = sumReconciliationActual(source, reportMonth);
     }
     const deductionsTotal = (appData.Hold_AE?.data || []).reduce((sum: number, row: any) => {
