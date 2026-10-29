@@ -48,7 +48,24 @@ export class SyncEngine {
     private apply: (updater: (data: AppData) => AppData) => void | Promise<void>,
     private report: (state: SyncState) => void,
     private backup: () => Promise<void>,
+    private refreshData?: (data: AppData) => Promise<AppData>,
   ) {}
+  private async refresh() {
+    if (!this.refreshData) return;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const before = this.getData();
+      const refreshed = await this.refreshData(before);
+      if (this.stopped) return;
+      if (this.getData() !== before) continue;
+      if (refreshed === before) return;
+      // The refreshed fields form one monthly snapshot. A month switch or edit
+      // during the read must not install only half of that snapshot.
+      await this.apply(current => current === before ? refreshed : current);
+      this.changed();
+      if (this.getData() === refreshed) return;
+    }
+    throw new Error('Dữ liệu thay đổi trong lúc tải Batch Payment. Bấm Đồng bộ ngay để thử lại.');
+  }
   private checkpoint() {
     this.storage.setItem(
       checkpointKey(this.repository.owner),
@@ -165,10 +182,20 @@ export class SyncEngine {
           this.changed();
           if (!this.dirty.size && latest.revision === remote.revision && sameManifest(latest.manifest, remote.manifest)) {
             this.base = latest;
+            await this.refresh();
+            if (this.stopped) return;
+            const checked = await this.repository.read();
+            if (this.stopped) return;
+            if (!checked) throw new Error('Bản cloud vừa thay đổi. Bấm Đồng bộ ngay để tải lại.');
+            if (checked.revision !== latest.revision || !sameManifest(checked.manifest, latest.manifest)) {
+              remote = checked;
+              continue;
+            }
             this.storage.setItem(OWNER_KEY, this.repository.owner);
             this.ready = true;
             this.checkpoint();
-            this.report({ status: "synced", updatedAt: latest.updated_at, revision: latest.revision });
+            if (this.dirty.size) await this.sync();
+            else this.report({ status: "synced", updatedAt: latest.updated_at, revision: latest.revision });
             return;
           }
           remote = latest;
@@ -181,6 +208,7 @@ export class SyncEngine {
       } else {
         // A genuinely new workspace can be seeded only after a successful read.
         Object.keys(this.getData()).forEach((key) => this.dirty.add(key));
+        await this.refresh();
       }
       if (this.stopped) return;
       this.storage.setItem(OWNER_KEY, this.repository.owner);
@@ -345,6 +373,10 @@ export class SyncEngine {
         }
         this.base = { ...committed, manifest: { version: 1, fields } };
       } else this.base = null;
+      // Read history after installing incoming workspace fields: an older
+      // workspace must not replace a newer monthly snapshot just fetched.
+      if (!this.initializing) await this.refresh();
+      if (this.stopped) return;
       this.checkpoint();
       if (pending.length && typeof window !== "undefined") window.dispatchEvent(new Event(CLOUD_CACHE_EVENT));
       if (pending.length) void this.repository.cleanup().catch(() => undefined);

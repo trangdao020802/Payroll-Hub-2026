@@ -44,12 +44,13 @@ export async function replaceVersionIfCurrent(
   return saveVersion(client, period, rows, requestId);
 }
 
-async function latestVersionIds(client: SupabaseClient, before: string): Promise<Map<string, string>> {
+async function latestVersionIds(client: SupabaseClient, before?: string): Promise<Map<string, string>> {
   const latest = new Map<string, string>();
   let cursor: string | undefined;
   while (true) {
     let query = client.from('transaction_monthly_versions').select('id, period')
-      .lt('period', before).order('id', { ascending: false }).limit(200);
+      .order('id', { ascending: false }).limit(200);
+    if (before) query = query.lt('period', before);
     if (cursor) query = query.lt('id', cursor);
     const { data, error } = await query;
     if (error) throw new Error(error.message);
@@ -82,6 +83,27 @@ async function loadPinnedVersions(client: SupabaseClient, latest: Map<string, st
 export async function loadAllPriorVersions(client: SupabaseClient, period: string): Promise<TransactionVersion[]> {
   await requireHistoryMember(client);
   return loadPinnedVersions(client, await latestVersionIds(client, `${normalizePeriod(period)}-01`));
+}
+
+/** Restore all saved months, reusing only pinned versions with an unchanged ID. */
+export async function loadLatestTransactionMonths(
+  client: SupabaseClient,
+  known: Record<string, TransactionVersion> = {},
+): Promise<TransactionVersion[]> {
+  await requireHistoryMember(client);
+  const latest = await latestVersionIds(client);
+  const missing = new Map([...latest].filter(([period, id]) => known[period.slice(0, 7)]?.id !== id));
+  const fetched = await loadPinnedVersions(client, missing);
+  const byPeriod = new Map(fetched.map(version => [version.period, version]));
+  const versions = [...latest].map(([period, id]) => {
+    const version = byPeriod.get(period) || known[period.slice(0, 7)];
+    if (!version || version.id !== id || version.period !== period) throw new Error('Không đọc được đầy đủ Batch Payment theo tháng.');
+    return version;
+  });
+  if (!sameVersionIds(latest, await latestVersionIds(client))) {
+    throw new HistorySaveConflictError('Batch Payment vừa được cập nhật. Bấm Đồng bộ ngay để tải lại đầy đủ các tháng.');
+  }
+  return versions.sort((a, b) => a.period.localeCompare(b.period));
 }
 
 function afterPeriod(period: string): string {

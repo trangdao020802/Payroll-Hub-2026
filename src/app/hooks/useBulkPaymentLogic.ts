@@ -859,6 +859,7 @@ export function useBulkPaymentLogic() {
             [currentMonthVal]: { ...reconciliationTotals, generatedAt },
           },
           TransactionActivity: markTransactionGenerated(prev, generatedAt),
+          TransactionHistoryRestoreDisabled: false,
         };
         return cacheActiveTransactionMonth(next);
       }, true, true, ["BankExport"]);
@@ -961,6 +962,7 @@ export function useBulkPaymentLogic() {
       ...prev,
       BankExport: { ...prev.BankExport, data: [] },
       TransactionMonthCache: undefined,
+      TransactionHistoryRestoreDisabled: true,
     }));
     setReportStats(null);
     toast.success("Đã xóa dữ liệu bảng kê");

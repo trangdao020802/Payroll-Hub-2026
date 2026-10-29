@@ -50,6 +50,16 @@ export function trackTransactionMonthOriginal(previous: AppData, next: AppData, 
 
 export function getTransactionMonthOriginal(data: AppData): TableData {
   const period = normalizePeriod(data.globalMonth);
+  // A verified saved month supersedes the generated pre-edit baseline. Reset
+  // must not undo saved amounts or identity corrections after a cloud restore.
+  const saved = data.TransactionMonthCache?.cloudMonths?.[period];
+  if (saved) {
+    if (normalizePeriod(saved.period.slice(0, 7)) !== period ||
+        saved.rows.some(row => periodOf(row['Tháng báo cáo'] || row._fileMonth) !== period)) {
+      throw new Error(`Batch Payment đã lưu không đúng tháng ${data.globalMonth}. Dữ liệu được giữ nguyên.`);
+    }
+    return structuredClone({...data.BankExport, data: saved.rows});
+  }
   const original = data.TableOriginals?.BankExportByMonth?.[period];
   if (original) {
     if (original.data.some(row => periodOf(row['Tháng báo cáo'] || row._fileMonth) !== period)) {

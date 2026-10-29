@@ -54,6 +54,7 @@ import {
 } from "../../../lib/utils/hold-carryover";
 import { createDeductionsDisplayProjector } from "../../../lib/utils/deductions-view";
 import { createReconciliationTotalsCalculator } from "../../../lib/utils/reconciliation-sync";
+import { ReconciliationTotalsSummary } from './ReconciliationTotalsSummary';
 import {
   sortMissingDeductionsSourceNotesFirst,
 } from "../../../lib/utils/deductions-sheet-source";
@@ -988,21 +989,7 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
 
             {/* Reconciliation and deductions totals */}
             <div className="flex items-center gap-4 mr-1">
-              <div
-                className="flex flex-col items-end"
-                title={`Actual payment: ${formatVNRobust(reconciliationTotals.actual, 0)} · Expected: ${formatVNRobust(reconciliationTotals.expected, 0)}`}
-              >
-                <span className="text-[8px] font-bold text-muted-foreground uppercase tracking-tighter whitespace-nowrap">TOTAL VARIANCE</span>
-                <span
-                  className={`text-xs font-black leading-tight tabular-nums ${
-                    Math.abs(reconciliationTotals.variance) < 1
-                      ? "text-emerald-600"
-                      : "text-rose-600"
-                  }`}
-                >
-                  {formatVNRobust(reconciliationTotals.variance, 0)}
-                </span>
-              </div>
+              <ReconciliationTotalsSummary month={currentReportMonth} totals={reconciliationTotals} />
               <div className="flex flex-col items-end border-l border-border pl-4">
                 <span className="text-[8px] font-bold text-muted-foreground uppercase tracking-tighter whitespace-nowrap">TỔNG TIỀN</span>
                 <div className="bg-muted/60 px-2 py-0.5 rounded border border-border/60 mt-0.5">

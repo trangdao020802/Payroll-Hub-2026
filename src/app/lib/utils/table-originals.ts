@@ -54,10 +54,12 @@ export function restoreTableOriginals(data: AppData, fields: readonly OriginalFi
     restored.BankExport = {...original, data: replaceTransactionPeriod(data.BankExport.data, period, original.data)};
     restored.TransactionActivity = markTransactionSaved(data, savedAt);
     restored.TransactionMonthCache = {
+      ...data.TransactionMonthCache,
       activePeriod: period,
       months: {
         ...data.TransactionMonthCache?.months,
-        [period]: {table: original, activity: restored.TransactionActivity},
+        [period]: {table: original, activity: restored.TransactionActivity,
+          cloudVersionId: data.TransactionMonthCache?.cloudMonths?.[period]?.id},
       },
     };
     restored.ReconciliationByMonth = {

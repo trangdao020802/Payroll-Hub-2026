@@ -14,6 +14,9 @@ import { rememberCloudField, cachedFieldHash, cachedFieldHashes, restoreFieldHas
 import { withDeadline } from "../src/app/lib/cloud/deadline";
 import { INITIAL_APP_DATA } from "../src/app/constants/initial-data";
 import { calculateReconciliationTotals, syncReportingMonthReconciliation } from "../src/app/lib/utils/reconciliation-sync";
+import { restoreSavedTransactionMonths } from '../src/app/lib/utils/transaction-cloud-restore';
+import { restoreTableOriginals } from '../src/app/lib/utils/table-originals';
+import type { TransactionVersion } from '../src/app/lib/transaction-history-store';
 const asset = (hash: string) => ({ hash, bytes: 10, parts: [hash] });
 const manifest = (fields: Record<string, string>): Manifest => ({
   version: 1,
@@ -151,7 +154,7 @@ function harness() {
         return structuredClone(server);
       },
     }) as unknown as CloudRepository;
-  function client(initial: Record<string, unknown>, deferApply = false) {
+  function client(initial: Record<string, unknown>, deferApply = false, refreshData?: (data: AppData) => Promise<AppData>) {
     let data = initial;
     const updates: Array<{ updater: (data: AppData) => AppData; resolve: () => void }> = [];
     let notifyApply!: () => void;
@@ -182,6 +185,7 @@ function harness() {
         }
         backups.push(structuredClone(data));
       },
+      refreshData,
     );
     return {
       engine,
@@ -787,4 +791,151 @@ test("a hanging cloud request times out and closing the session aborts a pending
   const request = withDeadline(() => new Promise(() => {}), "timed out", 1000, session.signal);
   session.abort();
   await assert.rejects(request, /Phiên đồng bộ đã đóng/);
+});
+
+function monthlyRestoreFixture() {
+  const data: AppData = {...structuredClone(INITIAL_APP_DATA), globalMonth: '02.2026',
+    Sheet1_AE: {headers: [], data: [{'Tháng báo cáo': '02.2026', 'ID Number': 'TEST', 'TOTAL PAYMENT': 700_595_349}]},
+    BankExport: {headers: [], data: []},
+    TableOriginals: {BankExportByMonth: {'2026-02': {headers: [], data: []}}}};
+  const version: TransactionVersion = {id: '181', period: '2026-02-01', created_at: '2026-10-29T05:24:30Z',
+    rows: [{'Tháng báo cáo': '2026-02', 'Document ID': 'TEST', 'Payment Amount': 700_595_349}]};
+  return {data, version};
+}
+
+test('three independent computers restore missing saved Batch Payment and Reset keeps its totals without extra revisions', async () => {
+  const h = harness();
+  const {data, version} = monthlyRestoreFixture();
+  const oldBuild = h.client({...data});
+  await oldBuild.engine.start();
+  oldBuild.engine.stop();
+  assert.equal(h.commits, 1);
+  for (let device = 0; device < 3; device++) {
+    h.resetDevice();
+    const client = h.client({...structuredClone(INITIAL_APP_DATA)}, false,
+      async current => restoreSavedTransactionMonths(current, [version]));
+    try {
+      await client.engine.start();
+      const restored = client.data as unknown as AppData;
+      assert.equal((client.states.at(-1) as {status: string}).status, 'synced');
+      assert.equal(restored.BankExport.data.length, 1);
+      assert.equal(calculateReconciliationTotals(restored).variance, 0);
+      const reset = restoreTableOriginals(restored, ['BankExport']);
+      assert.equal(calculateReconciliationTotals(reset).variance, 0);
+      assert.equal(reset.BankExport.data.length, 1);
+      await client.engine.flush();
+      assert.equal(h.commits, 2, 'history is backfilled once; other computers do not duplicate it');
+    } finally {client.engine.stop();}
+  }
+});
+
+test('login waits for saved Batch Payment history and never acknowledges a failed history download as synced', async () => {
+  const h = harness();
+  const {data, version} = monthlyRestoreFixture();
+  const seed = h.client({...data});
+  await seed.engine.start();
+  seed.engine.stop();
+  h.resetDevice();
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => {release = resolve;});
+  const reading = new Promise<void>(resolve => {started = resolve;});
+  let fail = true;
+  const client = h.client({...structuredClone(INITIAL_APP_DATA)}, false, async current => {
+    started();
+    await gate;
+    if (fail) throw new Error('history download failed');
+    return restoreSavedTransactionMonths(current, [version]);
+  });
+  try {
+    const opening = client.engine.start();
+    await reading;
+    assert.equal(client.states.some(state => (state as {status: string}).status === 'synced'), false);
+    release();
+    await opening;
+    assert.equal((client.states.at(-1) as {status: string}).status, 'error');
+    assert.equal(h.commits, 1);
+    fail = false;
+    await client.engine.retry();
+    assert.equal((client.states.at(-1) as {status: string}).status, 'synced');
+    assert.equal(calculateReconciliationTotals(client.data as unknown as AppData).variance, 0);
+  } finally {release(); client.engine.stop();}
+});
+
+test('background sync installs a new saved month without overwriting a payroll edit made during its download', async () => {
+  const h = harness();
+  const {data, version} = monthlyRestoreFixture();
+  let latest = version;
+  let pause = false;
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => {release = resolve;});
+  const reading = new Promise<void>(resolve => {started = resolve;});
+  const client = h.client({...data}, false, async current => {
+    if (pause) {pause = false; started(); await gate;}
+    return restoreSavedTransactionMonths(current, [latest]);
+  });
+  try {
+    await client.engine.start();
+    latest = {...version, id: '182', rows: version.rows.map(row => ({...row, 'Payment Amount': 700_595_359}))};
+    pause = true;
+    const syncing = client.engine.sync();
+    await reading;
+    client.edit('BankExport', {headers: [], data: version.rows.map(row => ({...row, 'Payment Amount': 123}))});
+    release();
+    await syncing;
+    await client.engine.flush();
+    const restored = client.data as unknown as AppData;
+    assert.equal(restored.BankExport.data[0]['Payment Amount'], 123);
+    assert.equal(restored.TransactionMonthCache?.cloudMonths?.['2026-02'].id, '182');
+    assert.equal(restoreTableOriginals(restored, ['BankExport']).BankExport.data[0]['Payment Amount'], 700_595_359);
+    assert.equal((client.states.at(-1) as {status: string}).status, 'synced');
+  } finally {release(); client.engine.stop();}
+});
+
+test('background history refresh updates clean payments, persists them, and keeps genuine differences on another computer', async () => {
+  const h = harness();
+  const {data, version} = monthlyRestoreFixture();
+  let latest = version;
+  const refresh = async (current: AppData) => restoreSavedTransactionMonths(current, [latest]);
+  const first = h.client({...data}, false, refresh);
+  let second: ReturnType<typeof h.client> | undefined;
+  try {
+    await first.engine.start();
+    latest = {...version, id: '182', rows: version.rows.map(row => ({...row, 'Payment Amount': 700_595_359}))};
+    await first.engine.flush();
+    assert.equal(calculateReconciliationTotals(first.data as unknown as AppData).variance, 10);
+    const commits = h.commits;
+    h.resetDevice();
+    second = h.client({...structuredClone(INITIAL_APP_DATA)}, false, refresh);
+    await second.engine.start();
+    assert.equal(calculateReconciliationTotals(second.data as unknown as AppData).variance, 10);
+    await second.engine.flush();
+    assert.equal(h.commits, commits);
+  } finally {first.engine.stop(); second?.engine.stop();}
+});
+
+test('login rechecks the workspace after downloading history so a concurrent payroll save cannot unlock stale totals', async () => {
+  const h = harness();
+  const {data, version} = monthlyRestoreFixture();
+  const first = h.client({...data});
+  await first.engine.start();
+  h.resetDevice();
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => {release = resolve;});
+  const reading = new Promise<void>(resolve => {started = resolve;});
+  const second = h.client({...structuredClone(INITIAL_APP_DATA)}, false, async current => {
+    started(); await gate;
+    return restoreSavedTransactionMonths(current, [version]);
+  });
+  try {
+    const opening = second.engine.start();
+    await reading;
+    first.edit('Sheet1_AE', {headers: [], data: data.Sheet1_AE.data.map(row => ({...row, 'TOTAL PAYMENT': 700_595_359}))});
+    await first.engine.flush();
+    assert.equal(second.states.some(state => (state as {status: string}).status === 'synced'), false);
+    release();
+    await opening;
+    assert.equal(calculateReconciliationTotals(second.data as unknown as AppData).variance, -10);
+    assert.equal((second.states.at(-1) as {status: string}).status, 'synced');
+    assert.equal((second.states.at(-1) as {revision: number}).revision, h.server?.revision);
+  } finally {release(); first.engine.stop(); second.engine.stop();}
 });

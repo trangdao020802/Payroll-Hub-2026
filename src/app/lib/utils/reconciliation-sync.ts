@@ -16,6 +16,8 @@ export interface ReconciliationTotals {
   variance: number;
   grossPayTotal: number;
   deductionsTotal: number;
+  hasActual: boolean;
+  actualSource: 'batch-payment' | 'bank-ae' | 'missing';
 }
 
 type ReconciliationSource = Pick<
@@ -24,6 +26,14 @@ type ReconciliationSource = Pick<
 > & { globalMonth?: string } & Partial<Pick<
   AppData, "BankExport" | "TransactionActivity" | "TransactionMonthCache"
 >>;
+
+interface ReconciliationActualSource {
+  rows: AppData['BankExport']['data'];
+  confirmed: boolean;
+  allowMissingMonth?: boolean;
+  available: boolean;
+  source: ReconciliationTotals['actualSource'];
+}
 
 function readFirst(row: any, keys: string[]): unknown {
   for (const key of keys) {
@@ -119,9 +129,9 @@ export function getDeductionContribution(row: any, reportMonth: string): number 
 export function getReconciliationActualSource(
   appData: ReconciliationSource,
   reportMonth: string,
-): { rows: any[]; confirmed: boolean; allowMissingMonth?: boolean } {
+): ReconciliationActualSource {
   const target = parseMonthPeriod(reportMonth);
-  if (!target) return { rows: [], confirmed: false };
+  if (!target) return { rows: [], confirmed: false, available: false, source: 'missing' };
   const active = parseMonthPeriod(
     appData.TransactionMonthCache?.activePeriod ||
       appData.globalMonth ||
@@ -131,28 +141,34 @@ export function getReconciliationActualSource(
     target &&
     active?.key === target.key &&
     appData.TransactionActivity?.lastAction === "saved" &&
-    appData.BankExport
+    appData.BankExport &&
+    (!appData.BankExport.data.length || appData.BankExport.data.some(row => bankRowMatchesReportMonth(row, reportMonth)))
   ) {
-    return { rows: appData.BankExport.data, confirmed: true };
+    return { rows: appData.BankExport.data, confirmed: true, available: true, source: 'batch-payment' };
   }
   const cached = appData.TransactionMonthCache?.months[target.key];
-  if (cached?.activity?.lastAction === "saved")
-    return { rows: cached.table.data, confirmed: true };
+  if (cached?.activity?.lastAction === "saved" && (!cached.table.data.length ||
+      cached.table.data.some(row => bankRowMatchesReportMonth(row, reportMonth))))
+    return { rows: cached.table.data, confirmed: true, available: true, source: 'batch-payment' };
+
+  const savedMonth = appData.TransactionMonthCache?.cloudMonths?.[target.key];
+  if (savedMonth) return {rows: savedMonth.rows, confirmed: true, available: true, source: 'batch-payment'};
 
   const bankNorthRows = appData.Bank_North_AE?.data || [];
-  if (bankNorthRows.some((row) => bankRowMatchesReportMonth(row, reportMonth))) {
-    return { rows: bankNorthRows, confirmed: false };
+  const allowMissingMonth = active?.key === target.key;
+  if (bankNorthRows.some((row) => bankRowMatchesReportMonth(row, reportMonth, allowMissingMonth))) {
+    return { rows: bankNorthRows, confirmed: false, allowMissingMonth, available: true, source: 'bank-ae' };
   }
 
   // A retained month can outlive its imported Bank AE file. Restore its rows
   // even for older snapshots without activity metadata, without promoting a
   // generated/edited preview to confirmed payment or overriding a bank source.
-  if (cached) return { rows: cached.table.data, confirmed: false };
+  if (cached?.table.data.some(row => bankRowMatchesReportMonth(row, reportMonth)))
+    return { rows: cached.table.data, confirmed: false, available: true, source: 'batch-payment' };
 
   // Unlabelled rows belong only to the active period. An empty current table
   // or a payment from another month cannot substitute for a retained month.
   const currentRows = appData.BankExport?.data || [];
-  const allowMissingMonth = active?.key === target.key;
   if (currentRows.some(row =>
     matchesMonthValue(
       readFirst(row, ["Tháng báo cáo", "_fileMonth", "Tháng", "Month"]),
@@ -160,10 +176,10 @@ export function getReconciliationActualSource(
       allowMissingMonth,
     ),
   )) {
-    return { rows: currentRows, confirmed: false, allowMissingMonth };
+    return { rows: currentRows, confirmed: false, allowMissingMonth, available: true, source: 'batch-payment' };
   }
 
-  return { rows: [], confirmed: false };
+  return { rows: [], confirmed: false, available: false, source: 'missing' };
 }
 
 function sumReconciliationActual(
@@ -251,6 +267,8 @@ export function calculateReconciliationTotals(
     variance: actual - expected,
     grossPayTotal,
     deductionsTotal,
+    hasActual: source.available,
+    actualSource: source.source,
   };
 }
 
@@ -286,7 +304,7 @@ export function createReconciliationTotalsCalculator(reportMonth: string) {
       return sum + contribution;
     }, 0);
     const expected = grossPayTotal + deductionsTotal;
-    return { actual, expected, variance: actual - expected, grossPayTotal, deductionsTotal };
+    return { actual, expected, variance: actual - expected, grossPayTotal, deductionsTotal, hasActual: source.available, actualSource: source.source };
   };
 }
 
@@ -371,10 +389,12 @@ export function cacheActiveTransactionMonth(appData: AppData): AppData {
   return {
     ...appData,
     TransactionMonthCache: {
+      ...appData.TransactionMonthCache,
       activePeriod: period,
       months: {
         ...(appData.TransactionMonthCache?.months || {}),
         [period]: {
+          ...appData.TransactionMonthCache?.months[period],
           table: appData.BankExport,
           activity: appData.TransactionActivity,
         },
@@ -405,17 +425,23 @@ export function syncReportingMonthReconciliation(
   }
   for (const [rowPeriod, rows] of groups) {
     months[rowPeriod] = {
+      ...months[rowPeriod],
       table: groups.size === 1 ? currentTable : {...currentTable, data: rows},
       activity: appData.TransactionActivity,
     };
   }
   // Keep an intentionally emptied month empty when navigating away and back.
-  if (!currentTable.data.length && appData.TransactionMonthCache?.activePeriod) {
+  if (!currentTable.data.length && appData.TransactionMonthCache?.activePeriod &&
+      (appData.TransactionActivity?.lastAction === 'saved' || appData.TransactionActivity?.lastAction === 'edited')) {
     months[appData.TransactionMonthCache.activePeriod] = {
+      ...months[appData.TransactionMonthCache.activePeriod],
       table: currentTable, activity: appData.TransactionActivity,
     };
   }
-  const existing = months[period];
+  const storedMonth = appData.TransactionMonthCache?.cloudMonths?.[period];
+  const existing = months[period] || (storedMonth ? {table: {...currentTable, data: storedMonth.rows}, activity: {
+    generatedAt: storedMonth.created_at, lastSavedAt: storedMonth.created_at, editCount: 0, saveVersion: 0, lastAction: 'saved' as const,
+  }, cloudVersionId: storedMonth.id} : undefined);
   const refreshedRows = buildBankExportRowsForMonth(appData, month);
   // Only untouched generated data may be refreshed from Bank AE, and only
   // when that month still exists in the source. Never erase a cached historical
@@ -436,8 +462,9 @@ export function syncReportingMonthReconciliation(
     globalMonth: month,
     BankExport: table,
     TransactionMonthCache: {
+      ...appData.TransactionMonthCache,
       activePeriod: period,
-      months: {...months, [period]: {table, activity}},
+      months: {...months, [period]: {...existing, table, activity}},
     },
     ReconciliationByMonth: {
       ...(appData.ReconciliationByMonth || {}),

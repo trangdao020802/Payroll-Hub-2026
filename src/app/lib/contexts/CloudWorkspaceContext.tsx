@@ -16,6 +16,8 @@ import { CloudRepository } from "../cloud/repository";
 import { SyncEngine, OWNER_KEY, type SyncState } from "../cloud/engine";
 import { saveSnapshot } from "../utils/snapshot-manager";
 import { withDeadline } from "../cloud/deadline";
+import { loadLatestTransactionMonths } from "../transaction-history-store";
+import { restoreSavedTransactionMonths } from "../utils/transaction-cloud-restore";
 import {
   Dialog,
   DialogContent,
@@ -145,6 +147,15 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
           trigger: "restore",
           isPinned: true,
         });
+      },
+      async data => {
+        if (data.TransactionHistoryRestoreDisabled) return data;
+        const versions = await withDeadline(
+          () => loadLatestTransactionMonths(supabase, data.TransactionMonthCache?.cloudMonths),
+          'Không tải được đầy đủ Batch Payment đã lưu. Bấm Đồng bộ ngay để thử lại.',
+          60000,
+        );
+        return restoreSavedTransactionMonths(data, versions);
       },
     );
     engine.current = instance;

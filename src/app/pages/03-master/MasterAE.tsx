@@ -1248,6 +1248,7 @@ export function MasterAE() {
                   ...prev,
                   BankExport: { ...prev.BankExport, data: [] },
                   TransactionMonthCache: undefined,
+                  TransactionHistoryRestoreDisabled: true,
                 }));
                 setShowClearBankExportDialog(false);
                 toast.success("Đã xóa dữ liệu bảng kê");

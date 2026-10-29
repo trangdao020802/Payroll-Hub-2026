@@ -17,7 +17,7 @@ export function clearMasterTableData(
     ...previous,
     [table]: emptyTable(previous[table]),
     ...(table === "Hold_AE" ? { HoldCarrySnapshots: {} } : {}),
-    ...(table === "BankExport" ? { ReconciliationByMonth: {}, TransactionMonthCache: undefined } : {}),
+    ...(table === "BankExport" ? { ReconciliationByMonth: {}, TransactionMonthCache: undefined, TransactionHistoryRestoreDisabled: true } : {}),
     updatedAt: new Date().toISOString(),
   };
 }
@@ -33,6 +33,7 @@ export function clearMasterPageData(previous: AppData): AppData {
     SoSanh_AE: emptyTable(previous.SoSanh_AE),
     BankExport: emptyTable(previous.BankExport),
     TransactionMonthCache: undefined,
+    TransactionHistoryRestoreDisabled: true,
     ReconciliationByMonth: {},
     HoldCarrySnapshots: {},
     CustomReport: emptyTable(previous.CustomReport),
@@ -103,6 +104,7 @@ export function createClearedWebData(previous: AppData): AppData {
   return {
     ...cleanInitial,
     TableOriginals: {},
+    TransactionHistoryRestoreDisabled: true,
     globalMonth: previous.globalMonth,
     Timesheet_InputList: [],
     Timesheet_Roster: [],

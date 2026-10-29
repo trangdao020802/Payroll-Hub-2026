@@ -155,6 +155,7 @@ export function replaceTransactionSnapshotsInAppData(
     BankExport: bankExport,
     TransactionActivity: transactionActivity,
     TransactionMonthCache: {
+      ...appData.TransactionMonthCache,
       activePeriod: currentPeriod || appData.TransactionMonthCache?.activePeriod || normalized.keys().next().value || '',
       months,
     },

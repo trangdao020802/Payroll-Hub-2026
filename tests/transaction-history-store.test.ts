@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { loadLatestVersion, replaceVersionIfCurrent, saveVersion } from '../src/app/lib/transaction-history-store';
+import { loadLatestTransactionMonths, loadLatestVersion, replaceVersionIfCurrent, saveVersion } from '../src/app/lib/transaction-history-store';
 
 function clientFixture({member = true, signedIn = true, historyError = false} = {}) {
   const calls: unknown[][] = [];
@@ -96,7 +96,7 @@ test('resolution replaces a historical month only while its checked version is s
 });
 
 import { loadAllPriorVersions } from '../src/app/lib/transaction-history-store';
-function historyClient(failId?: string) {
+function historyClient(failId?: string, {allMonths = false, changeOnRecheck = false} = {}) {
   const records = [
     {id: '1', period: '2026-01-01', rows: [{old: true}]},
     {id: '2', period: '2026-01-01', rows: [{old: false}]},
@@ -108,6 +108,7 @@ function historyClient(failId?: string) {
   ].map(item => ({...item, created_at: '2026-09-07T00:00:00Z'}));
   const reads: string[] = [];
   let pages = 0;
+  let rounds = 0;
   const client = {auth: {getUser: async () => ({data:{user:{id:'member'}},error:null})},
     from(table: string) {
       let before = ''; let cursor = Infinity; let id = '';
@@ -120,9 +121,12 @@ function historyClient(failId?: string) {
         then(resolve: (value: unknown) => unknown, reject: (reason: unknown) => unknown) {
           pages++;
           assert.equal(table, 'transaction_monthly_versions');
-          assert.equal(before, '2026-08-01');
+          assert.equal(before, allMonths ? '' : '2026-08-01');
+          if (cursor === Infinity && ++rounds === 2 && changeOnRecheck) {
+            records.push({...records[4], id: '8'});
+          }
           // Simulate server cap smaller than requested page size, forcing keyset continuation.
-          return Promise.resolve({data:records.filter(r=>r.period<before && Number(r.id)<cursor).sort((a,b)=>Number(b.id)-Number(a.id)).slice(0,2),error:null}).then(resolve,reject);
+          return Promise.resolve({data:records.filter(r=>(!before || r.period<before) && Number(r.id)<cursor).sort((a,b)=>Number(b.id)-Number(a.id)).slice(0,2),error:null}).then(resolve,reject);
         },
       }; return q;
     },
@@ -139,4 +143,27 @@ test('all prior months load their newest version across every metadata page, exc
 test('all-month check fails instead of returning partial history when any snapshot fails', async () => {
   await assert.rejects(loadAllPriorVersions(historyClient('3').client,'08.2026'),/snapshot read failed/);
   await assert.rejects(loadAllPriorVersions(clientFixture({member:false}).client,'08.2026'),/chưa được cấp quyền/);
+});
+
+test('workspace restore reads the latest version of every month and reuses only unchanged pinned versions', async () => {
+  const fixture = historyClient(undefined, {allMonths: true});
+  const versions = await loadLatestTransactionMonths(fixture.client);
+  assert.deepEqual(versions.map(item => [item.period, item.id]), [
+    ['2025-12-01', '6'], ['2026-01-01', '7'], ['2026-07-01', '3'], ['2026-08-01', '4'], ['2026-09-01', '5'],
+  ]);
+  assert.equal(fixture.pages, 10, 'all metadata pages are read before and after snapshot downloads');
+  const known = Object.fromEntries(versions.map(item => [item.period.slice(0, 7), item]));
+  const second = historyClient(undefined, {allMonths: true});
+  assert.deepEqual(await loadLatestTransactionMonths(second.client, known), versions);
+  assert.deepEqual(second.reads, [], 'unchanged verified snapshots do not download again');
+  known['2026-01'] = {...known['2026-01'], id: '2'};
+  const changed = historyClient(undefined, {allMonths: true});
+  await loadLatestTransactionMonths(changed.client, known);
+  assert.deepEqual(changed.reads, ['7'], 'an old version ID must download the latest rows');
+});
+
+test('workspace history restore rejects partial reads, missing membership and a version changed during download', async () => {
+  await assert.rejects(loadLatestTransactionMonths(historyClient('3', {allMonths: true}).client), /snapshot read failed/);
+  await assert.rejects(loadLatestTransactionMonths(clientFixture({member: false}).client), /chưa được cấp quyền/);
+  await assert.rejects(loadLatestTransactionMonths(historyClient(undefined, {allMonths: true, changeOnRecheck: true}).client), /vừa được cập nhật/);
 });

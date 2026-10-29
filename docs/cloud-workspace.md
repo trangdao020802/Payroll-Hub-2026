@@ -80,3 +80,50 @@ The host default `America/Sao_Paulo` exposes one existing Timesheet coverage
 date-boundary test failure; it reproduces unchanged at parent `1c47e66`.
 Automated cases use synthetic payroll and the local test database, without
 changing the owner's production payroll.
+
+### 2026-10-29: restore saved Batch Payment months and keep Reset consistent
+
+The owner still saw a February variance of roughly minus 700 million after
+Reset. Workspace synchronization did retain BankExport and the working month
+map, but did not read the separate transaction_monthly_versions history when
+those working tables were missing. Reset could also restore a generated empty
+baseline instead of the Batch Payment subsequently saved for that same month.
+
+Login and normal workspace sync now read the latest saved version of every
+Transaction month, pin/recheck the version IDs, and fetch only changed snapshots.
+Missing months are restored into the working month map and the selected payment
+table. Clean months follow newer history; ongoing working edits and explicitly
+saved empty months remain intact. Explicit table/page deletion opts out of this
+automatic recovery until payments are generated or a saved month is loaded.
+History read failures cannot report a successful login restore. The workspace
+revision is rechecked after history downloads, and refresh applies one complete
+snapshot or retries if the active month or local data changed during the read.
+
+Verified history is retained inside TransactionMonthCache in the existing cloud
+format. Month navigation, working saves and identity corrections preserve it.
+Reset prefers that month's latest verified saved version over an older generated
+original, updates the selected working month and totals together, and preserves
+other months and source tables. Without a saved history version it still uses
+only the matching month original. Normal workspace Save continues to persist
+working Batch Payment; **Lưu tháng** updates the separate history used by ID/STK
+checks. Synchronization never concatenates the two copies.
+
+The Deductions total distinguishes missing payment data from a measured zero or
+a real monetary discrepancy. Its details show the actual payment source, Gross
+Pay, deductions contribution and calculation. No amount is adjusted to force a
+zero variance. Unlabelled bank rows are restricted to their active month.
+
+Verification includes independent-device restores, a login-time history failure,
+concurrent payroll changes during history download, changed history IDs, all nine
+months through repeated Reset/navigation, preservation of edits/intentional empty
+months, partial read rejection and real nonzero variances. Production checks were
+read-only: all nine latest saved months were present, February had 650 rows, and
+all saved row months matched their version periods. No database migration or
+production payroll rewrite is needed. Automated scenarios use synthetic data;
+the owner's signed-in session remains an acceptance check.
+
+All 375 tests pass with `TZ=Asia/Ho_Chi_Minh npm test`; TypeScript, production
+build and focused ESLint pass (one existing BulkPayment dependency warning).
+The visible missing/zero/nonzero total states are verified with React server
+rendering. An interactive local browser check was unavailable because the
+browser executable could not be installed in this environment.

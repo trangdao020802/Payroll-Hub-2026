@@ -105,11 +105,14 @@ export interface AppData {
     saveVersion: number;
     lastAction: "generated" | "edited" | "saved";
   };
-  /** Local working Transaction snapshots, retained when the reporting month changes. */
+  /** Working Transaction months and verified history, both persisted with the cloud workspace. */
   TransactionMonthCache?: {
     activePeriod: string;
-    months: Record<string, {table: TableData; activity?: AppData['TransactionActivity']}>;
+    months: Record<string, {table: TableData; activity?: AppData['TransactionActivity']; cloudVersionId?: string}>;
+    cloudMonths?: Record<string, import('../lib/transaction-history-store').TransactionVersion>;
   };
+  /** Respect explicit table/page deletion until new payments are generated or a month is loaded. */
+  TransactionHistoryRestoreDisabled?: boolean;
   TrialBalanceTransactionVersion?: number;
   TrialBalanceTransactionVersions?: Record<string, number>;
   TrialBalanceRefreshedAt?: string;

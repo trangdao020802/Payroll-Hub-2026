@@ -3170,7 +3170,7 @@ export function BulkPayment({
                   <TableRestoreButton
                     placement="menu"
                     onRestore={handleResetTransactionMonth}
-                    title={`Khôi phục Batch Payment đúng tháng ${globalMonth} trước chỉnh sửa. Giữ nguyên các tháng khác. Dùng Bỏ lọc nếu chỉ cần hiển thị lại toàn bộ dòng.`}
+                    title={`Khôi phục Batch Payment tháng ${globalMonth} từ bản tháng đã lưu gần nhất; nếu chưa lưu, dùng bản gốc đúng tháng. Dùng Bỏ lọc để hiển thị lại toàn bộ dòng.`}
                   />
                 )}
                 <DropdownMenuItem

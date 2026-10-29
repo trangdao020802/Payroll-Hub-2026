@@ -39,6 +39,7 @@ export function applyLocalTransactionVersions(
   if (!versions.length) return appData;
   const activePeriod = normalizePeriod(appData.globalMonth);
   const months = {...appData.TransactionMonthCache?.months};
+  const cloudMonths = {...appData.TransactionMonthCache?.cloudMonths};
   let table = appData.BankExport;
   let activity = appData.TransactionActivity;
   let originals = appData;
@@ -54,7 +55,9 @@ export function applyLocalTransactionVersions(
     months[period] = {
       table: {...(existing?.table || appData.BankExport), data: selected},
       activity: nextActivity,
+      cloudVersionId: version.id,
     };
+    cloudMonths[period] = version;
     originals = withTransactionMonthOriginal(originals, period, months[period].table);
     if (period === activePeriod) {
       table = {...table, data: replaceTransactionPeriod(table.data, period, selected)};
@@ -66,6 +69,7 @@ export function applyLocalTransactionVersions(
     TableOriginals: originals.TableOriginals,
     BankExport: table,
     TransactionActivity: activity,
-    TransactionMonthCache: {activePeriod, months},
+    TransactionHistoryRestoreDisabled: false,
+    TransactionMonthCache: {...appData.TransactionMonthCache, activePeriod, months, cloudMonths},
   };
 }
