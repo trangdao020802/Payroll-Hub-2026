@@ -33,6 +33,7 @@ import { saveSnapshot } from "../utils/snapshot-manager";
 import { createLatestTaskQueue } from "../utils/latest-task-queue";
 import { CLOUD_HASHES_KEY, CLOUD_CACHE_EVENT, persistedFieldHashes, restoreFieldHashes, prepareHydrationTables, withAppStorageLock, type StoredCloudHashes } from "../cloud/field-cache";
 import { OWNER_KEY } from "../cloud/engine";
+import { captureSavedDeductions, protectSavedDeductions, restoreSavedDeductions, type DeductionsWriteOptions } from '../utils/deductions-lock';
 
 // Configure localforage
 localforage.config({
@@ -79,6 +80,7 @@ interface AppActionsCtx {
     saveToHistory?: boolean,
     persistImmediately?: boolean,
     sourceFields?: readonly OriginalField[],
+    deductionsOptions?: DeductionsWriteOptions,
   ) => void;
   undo: () => void;
   redo: () => void;
@@ -241,6 +243,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
         if (saved) {
           saved = prepareHydrationTables(saved);
+          saved = captureSavedDeductions(saved);
           // Split the legacy shared roster into page-owned namespaces. Older
           // versions let Master and Timesheet overwrite the same Q_Roster
           // array, so migrate once and never read that shared key again.
@@ -549,9 +552,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
           setState((prev) => ({
             ...prev,
-            present: {
-              ...normalizeGrossPaySpecialCenters(saved as AppData),
-            },
+            present: restoreSavedDeductions(normalizeGrossPaySpecialCenters(saved as AppData)),
           }));
           setHasStoredData(true);
         } else {
@@ -694,6 +695,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       saveToHistory: boolean = true,
       persistImmediately: boolean = false,
       sourceFields: readonly OriginalField[] = [],
+      deductionsOptions: DeductionsWriteOptions = {},
     ) => {
       // A previous screen's async callback must not edit the cache while a
       // login is replacing it with the current cloud snapshot.
@@ -707,13 +709,15 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
       setState((prev) => {
         if (cloudRestorePendingRef.current) return prev;
+        const protectedPrevious = captureSavedDeductions(prev.present);
         const updated =
           typeof updater === "function"
-            ? (updater as (p: AppData) => AppData)(prev.present)
-            : { ...prev.present, ...updater };
+            ? (updater as (p: AppData) => AppData)(protectedPrevious)
+            : { ...protectedPrevious, ...updater };
         const normalized = updated.Sheet1_AE?.data !== prev.present.Sheet1_AE?.data
           ? normalizeGrossPaySpecialCenters(updated) : updated;
-        const nextPresent = trackTableOriginals(prev.present, normalized, saveToHistory, sourceFields);
+        const guarded = protectSavedDeductions(protectedPrevious, normalized, deductionsOptions);
+        const nextPresent = trackTableOriginals(prev.present, guarded, saveToHistory, sourceFields);
         if (nextPresent === prev.present) return prev;
 
         oldPresentForTelemetry = prev.present;
@@ -766,7 +770,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       didUndo = true;
       return {
         past: prev.past.slice(0, -1),
-        present: previous,
+        present: protectSavedDeductions(prev.present, previous),
         future: [prev.present, ...prev.future],
       };
     });
@@ -794,7 +798,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       didRedo = true;
       return {
         past: [...prev.past, prev.present],
-        present: next,
+        present: protectSavedDeductions(prev.present, next),
         future: prev.future.slice(1),
       };
     });
@@ -835,16 +839,14 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       });
 
       if (updatedCount === 0) return prev;
-      return {
-        ...prev,
-        present: {
+      const present = protectSavedDeductions(prev.present, {
           ...prev.present,
           Hold_AE: {
             ...prev.present.Hold_AE,
             data: rows,
           },
-        },
-      };
+      });
+      return present === prev.present ? prev : {...prev, present};
     });
   }, [
     isLoading,

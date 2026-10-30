@@ -659,6 +659,7 @@ export function BulkPayment({
           return rId && cleanId && rId === cleanId;
         });
         if (s1Index !== -1) {
+          newSheet1[s1Index] = {...newSheet1[s1Index]};
           if (field === "accountNo" || field === "benefitsAccountNo")
             newSheet1[s1Index]["Bank Account Number"] = value;
           if (field === "docId" || field === "grossPlusBenefitsId")
@@ -673,6 +674,7 @@ export function BulkPayment({
           return rId && cleanId && rId === cleanId;
         });
         if (hIndex !== -1) {
+          newHold[hIndex] = {...newHold[hIndex]};
           if (field === "accountNo" || field === "benefitsAccountNo")
             newHold[hIndex]["Bank Account Number"] = value;
           if (field === "docId" || field === "grossPlusBenefitsId")
@@ -712,6 +714,7 @@ export function BulkPayment({
           rawTimesheetRows: [],
           reportMonth: prev.globalMonth,
           transactionKeys: [item.referenceTransactionKey],
+          lockedDeductionMonths: prev.HoldCarrySnapshots,
         });
 
         if (result.correctedCells === 0) {
@@ -801,8 +804,9 @@ export function BulkPayment({
       deductionRows: appData.Hold_AE?.data || [],
       transactionRows,
       reportMonth: appData.globalMonth,
+      lockedDeductionMonths: appData.HoldCarrySnapshots,
     });
-  }, [bankExportData, appData.BankExport?.data, appData.Bank_North_AE?.data, appData.Sheet1_AE?.data, appData.Hold_AE?.data, appData.globalMonth]);
+  }, [bankExportData, appData.BankExport?.data, appData.Bank_North_AE?.data, appData.Sheet1_AE?.data, appData.Hold_AE?.data, appData.globalMonth, appData.HoldCarrySnapshots]);
 
   const analysAnalytics = useMemo(() => {
     if (rightPanelTab !== "visuals" || displayBankExportData.length === 0) {
@@ -1737,6 +1741,7 @@ export function BulkPayment({
       deductionRows: appData.Hold_AE?.data || [],
       transactionRows,
       reportMonth: appData.globalMonth,
+      lockedDeductionMonths: appData.HoldCarrySnapshots,
     });
 
     if (result.correctedCells === 0) {
@@ -1764,6 +1769,7 @@ export function BulkPayment({
     appData.Sheet1_AE?.data,
     appData.Hold_AE?.data,
     appData.globalMonth,
+    appData.HoldCarrySnapshots,
     updateAppData,
   ]);
 

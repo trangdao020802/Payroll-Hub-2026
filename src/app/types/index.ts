@@ -134,6 +134,11 @@ export interface AppData {
       eligibleCount: number;
       carriedCount: number;
       nextMonth?: string;
+      /** Immutable month rows and displayed totals until Delete saved Hold. */
+      rows?: TableData['data'];
+      displayRows?: TableData['data'];
+      displayHeaders?: string[];
+      reconciliationTotals?: import('../lib/utils/reconciliation-sync').ReconciliationTotals;
     }
   >;
   ConfirmedIds_HoldAdd?: string[];

@@ -127,3 +127,36 @@ build and focused ESLint pass (one existing BulkPayment dependency warning).
 The visible missing/zero/nonzero total states are verified with React server
 rendering. An interactive local browser check was unavailable because the
 browser executable could not be installed in this environment.
+
+### 2026-10-30: saved Deductions remain fixed until Delete saved
+
+The Save Hold flag previously disabled direct editing only. Reconcile bulk and
+per-row identity sync, bank autofill, imports, Reset and carryover from another
+month could still alter the saved table. Saved months now retain separate raw
+rows, displayed rows/headers and the displayed reconciliation totals. The local
+write boundary protects all saved periods, including writes queued before Save,
+automatic bank repair and Undo/Redo. Snapshot rows never share mutable objects
+with the working table. Only the Delete saved Hold action explicitly unlocks its
+selected month; it cannot unlock or change another saved month.
+
+Reconcile skips locked Deductions while still updating editable Gross Pay, and
+the Deductions sync control is inactive while saved. Export, filtering and search
+continue to use the fixed saved view. Source and Batch Payment changes cannot
+change that view or its displayed totals. Deleting the saved snapshot restores
+normal editable/recalculated behavior. Previously saved metadata-only months
+capture their current values once; this does not reconstruct values changed by
+older builds before this fix.
+
+Frozen values persist in the existing HoldCarrySnapshots cloud field. Login
+upgrades legacy snapshots after the authoritative workspace has been installed,
+so it does not interfere with cloud hash verification. Background pulls follow
+the incoming saved/unlocked state; another computer's explicit Delete saved is
+not overridden by an old local lock. No schema or production payroll rewrite is
+required. Regression tests exercise the actual Save/Delete/Reconcile callbacks,
+stale callbacks, all write boundaries, carried rows, cloud serialization and
+independent device login/unlock behavior using synthetic payroll.
+
+Verification: all 384 tests pass under `TZ=Asia/Ho_Chi_Minh`, along with
+TypeScript and the production build. Focused ESLint has no errors and the same
+existing BulkPayment memo-dependency warning. Private account acceptance on the
+owner's computers is not exercised by these synthetic-data tests.

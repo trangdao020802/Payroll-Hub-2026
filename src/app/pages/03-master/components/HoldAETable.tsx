@@ -55,6 +55,7 @@ import {
 import { createDeductionsDisplayProjector } from "../../../lib/utils/deductions-view";
 import { createReconciliationTotalsCalculator } from "../../../lib/utils/reconciliation-sync";
 import { ReconciliationTotalsSummary } from './ReconciliationTotalsSummary';
+import { deductionsRowMonth, isDeductionsMonthLocked } from '../../../lib/utils/deductions-lock';
 import {
   sortMissingDeductionsSourceNotesFirst,
 } from "../../../lib/utils/deductions-sheet-source";
@@ -123,7 +124,7 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
     );
     const reconciliationTotals = useMemo(
       () =>
-        calculateTotals(
+        currentHoldSnapshot?.reconciliationTotals || calculateTotals(
           {
             globalMonth: currentReportMonth,
             Sheet1_AE: appData.Sheet1_AE,
@@ -143,6 +144,7 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
         appData.TransactionMonthCache,
         currentReportMonth,
         calculateTotals,
+        currentHoldSnapshot,
       ],
     );
 
@@ -202,6 +204,9 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
     // 2. Filter data up to the current active period
     const filteredData = useMemo(() => {
       const raw = appData.Hold_AE || { headers: [], data: [] };
+      if (currentHoldSnapshot?.displayRows) return {...raw,
+        headers: currentHoldSnapshot.displayHeaders || raw.headers,
+        data: currentHoldSnapshot.displayRows};
       if (!raw.data || !Array.isArray(raw.data))
         return { headers: [], data: [] };
 
@@ -224,7 +229,7 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
           holdTransactions.merge(normalizedRows),
         )),
       };
-    }, [appData.Hold_AE, appData.globalMonth, parseToMonthIndex, projectDisplayRow, prioritizeRows, holdTransactions]);
+    }, [appData.Hold_AE, appData.globalMonth, parseToMonthIndex, projectDisplayRow, prioritizeRows, holdTransactions, currentHoldSnapshot]);
 
     const [tableSummaryState, setTableSummaryState] = React.useState<{
       source: any[] | null;
@@ -739,15 +744,19 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
       }), true, true);
       toast.success("Đã khôi phục toàn bộ Deductions từ dữ liệu file gốc");
     };
-    const pendingSync = useMemo(() => hasPendingReconciliationReferenceSync({
+    const pendingSync = useMemo(() => !isCurrentMonthLocked && hasPendingReconciliationReferenceSync({
       grossRows: appData.Sheet1_AE?.data || [],
       deductionRows: appData.Hold_AE?.data || [],
       transactionRows: appData.BankExport?.data?.length ? appData.BankExport.data : appData.Bank_North_AE?.data || [],
       reportMonth: appData.globalMonth,
-    }), [appData.Sheet1_AE, appData.Hold_AE, appData.BankExport, appData.Bank_North_AE, appData.globalMonth]);
+    }), [appData.Sheet1_AE, appData.Hold_AE, appData.BankExport, appData.Bank_North_AE, appData.globalMonth, isCurrentMonthLocked]);
 
     const handleBulkSyncFromReconcile = useCallback(() => {
       updateAppData((prev: any) => {
+        if (isDeductionsMonthLocked(prev.HoldCarrySnapshots, prev.globalMonth)) {
+          toast.warning('Deductions đã chốt. Bấm Xóa bản lưu trước khi đồng bộ từ Reconcile.');
+          return prev;
+        }
         const transactionRows = (prev.BankExport?.data || []).length > 0
           ? prev.BankExport.data
           : prev.Bank_North_AE?.data || [];
@@ -781,17 +790,19 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
     });
 
     const handleClearAll = () => {
+      if (isCurrentMonthLocked) { toast.warning('Bấm Xóa bản lưu trước khi xóa dữ liệu Deductions.'); return; }
       setShowClearConfirm(true);
     };
 
     const handleConfirmClearAll = () => {
+      if (isCurrentMonthLocked) { toast.warning('Bấm Xóa bản lưu trước khi xóa dữ liệu Deductions.'); return; }
       updateAppData((prev: any) => ({
         ...prev,
         Hold_AE: { ...prev.Hold_AE, data: [] },
         HoldCarrySnapshots: {},
       }));
       setShowClearConfirm(false);
-      toast.success("Đã xóa tất cả dữ liệu Deductions");
+      toast.success("Đã xóa dữ liệu Deductions chưa chốt; các tháng đã lưu được giữ nguyên.");
     };
 
     const eligibleHoldCount = useMemo(() => {
@@ -844,6 +855,10 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
               eligibleCount: eligibleHoldCount,
               carriedCount: holdCarryover.carriedCount,
               nextMonth,
+              rows: structuredClone(holdCarryover.rows.filter(row => deductionsRowMonth(row, currentReportMonth) === currentReportMonth)),
+              displayRows: structuredClone(filteredData.data),
+              displayHeaders: [...filteredData.headers],
+              reconciliationTotals: structuredClone(reconciliationTotals),
             },
           },
         };
@@ -894,7 +909,7 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
           },
           HoldCarrySnapshots: snapshots,
         };
-      });
+      }, true, true, [], {unlockDeductionsMonth: currentReportMonth});
 
       setShowDeleteSnapshotConfirm(false);
       toast.success(

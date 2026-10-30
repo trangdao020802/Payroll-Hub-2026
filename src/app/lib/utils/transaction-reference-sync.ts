@@ -2,6 +2,8 @@
 import { parseMoneyToNumber, removeVietnameseTones } from "./data-utils";
 import { parseMonthPeriod } from "./bulk-payment-analytics";
 import { isSavedTransactionField } from './transaction-saved-fields';
+import type { AppData } from '../../types';
+import { deductionsRowMonth, isDeductionsMonthLocked } from './deductions-lock';
 
 export const TRANSACTION_REFERENCE_AUDIT_KEY =
   "_transactionReferenceAudit" as const;
@@ -702,6 +704,7 @@ export function applyTransactionReferenceSync({
   transactionKeys,
   targetTable,
   correctedAt = new Date().toISOString(),
+  lockedDeductionMonths,
 }: {
   grossRows: any[];
   deductionRows: any[];
@@ -711,6 +714,7 @@ export function applyTransactionReferenceSync({
   transactionKeys?: Iterable<string>;
   targetTable?: TransactionReferenceTable;
   correctedAt?: string;
+  lockedDeductionMonths?: AppData['HoldCarrySnapshots'];
 }): {
   grossRows: any[];
   deductionRows: any[];
@@ -734,9 +738,9 @@ export function applyTransactionReferenceSync({
   const allowedKeys = transactionKeys ? new Set(transactionKeys) : null;
   const selectedMatches = plan.matches.map(match => ({
     ...match,
-    corrections: targetTable
-      ? match.corrections.filter(c => c.table === targetTable)
-      : match.corrections,
+    corrections: match.corrections.filter(c => (!targetTable || c.table === targetTable) &&
+      (c.table !== 'Hold_AE' || !isDeductionsMonthLocked(lockedDeductionMonths,
+        deductionsRowMonth(deductionRows[c.rowIndex], reportMonth)))),
     // targetTable is a hard mutation boundary: scoped actions may only write
     // the requested downstream table, never Transaction/Batch Payment.
     transactionCorrections: targetTable ? [] : match.transactionCorrections,
@@ -844,11 +848,13 @@ export function getPendingReconciliationReferenceSyncKeys({
   deductionRows,
   transactionRows,
   reportMonth,
+  lockedDeductionMonths,
 }: {
   grossRows: any[];
   deductionRows: any[];
   transactionRows: any[];
   reportMonth?: string;
+  lockedDeductionMonths?: AppData['HoldCarrySnapshots'];
 }): string[] {
   const plan = buildTransactionReferenceSyncPlan({
     grossRows,
@@ -860,7 +866,8 @@ export function getPendingReconciliationReferenceSyncKeys({
   });
   return Array.from(new Set(
     plan.matches
-      .filter((match) => match.corrections.length > 0)
+      .filter((match) => match.corrections.some(c => c.table !== 'Hold_AE' ||
+        !isDeductionsMonthLocked(lockedDeductionMonths, deductionsRowMonth(deductionRows[c.rowIndex], reportMonth))))
       .map((match) => match.transactionKey),
   ));
 }
@@ -870,6 +877,7 @@ export function hasPendingReconciliationReferenceSync(args: {
   deductionRows: any[];
   transactionRows: any[];
   reportMonth?: string;
+  lockedDeductionMonths?: AppData['HoldCarrySnapshots'];
 }): boolean {
   return getPendingReconciliationReferenceSyncKeys(args).length > 0;
 }
@@ -885,17 +893,20 @@ export function applyBulkReconciliationReferenceSync({
   deductionRows,
   transactionRows,
   reportMonth,
+  lockedDeductionMonths,
 }: {
   grossRows: any[];
   deductionRows: any[];
   transactionRows: any[];
   reportMonth?: string;
+  lockedDeductionMonths?: AppData['HoldCarrySnapshots'];
 }): BulkReconciliationReferenceSyncResult {
   const pendingTransactionKeys = getPendingReconciliationReferenceSyncKeys({
     grossRows,
     deductionRows,
     transactionRows,
     reportMonth,
+    lockedDeductionMonths,
   });
 
   let nextGrossRows = grossRows;
@@ -911,6 +922,7 @@ export function applyBulkReconciliationReferenceSync({
       rawTimesheetRows: [],
       reportMonth,
       transactionKeys: [transactionKey],
+      lockedDeductionMonths,
     });
     if (result.correctedCells === 0) continue;
     nextGrossRows = result.grossRows;

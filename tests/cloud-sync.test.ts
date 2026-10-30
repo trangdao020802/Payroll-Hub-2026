@@ -17,6 +17,7 @@ import { calculateReconciliationTotals, syncReportingMonthReconciliation } from 
 import { restoreSavedTransactionMonths } from '../src/app/lib/utils/transaction-cloud-restore';
 import { restoreTableOriginals } from '../src/app/lib/utils/table-originals';
 import type { TransactionVersion } from '../src/app/lib/transaction-history-store';
+import { restoreSavedDeductions } from '../src/app/lib/utils/deductions-lock';
 const asset = (hash: string) => ({ hash, bytes: 10, parts: [hash] });
 const manifest = (fields: Record<string, string>): Manifest => ({
   version: 1,
@@ -938,4 +939,35 @@ test('login rechecks the workspace after downloading history so a concurrent pay
     assert.equal((second.states.at(-1) as {status: string}).status, 'synced');
     assert.equal((second.states.at(-1) as {revision: number}).revision, h.server?.revision);
   } finally {release(); first.engine.stop(); second.engine.stop();}
+});
+
+test('saved Deductions upgrade once on login, stay fixed across devices, and follow an explicit remote unlock', async () => {
+  const h = harness();
+  const source = {...structuredClone(INITIAL_APP_DATA), globalMonth: '02.2026',
+    Hold_AE: {headers: [], data: [{'Tháng báo cáo': '02.2026', 'Tháng phát sinh': '02.2026',
+      'ID Number': '00123', 'Full name': 'TEST EMPLOYEE', 'Bank Account Number': '00111',
+      'TOTAL PAYMENT': -100, 'Nghiệp vụ': 'Hold', 'Sheet Source': 'Hold T2'}]},
+    HoldCarrySnapshots: {'02.2026': {savedAt: '2026-10-30T01:00:00Z', eligibleCount: 1, carriedCount: 0}}};
+  const old = h.client({...source});
+  await old.engine.start(); old.engine.stop();
+  h.resetDevice();
+  const first = h.client({...structuredClone(INITIAL_APP_DATA)}, false, async data => restoreSavedDeductions(data));
+  let second: ReturnType<typeof h.client> | undefined;
+  try {
+    await first.engine.start();
+    await first.engine.flush();
+    assert.equal((first.states.at(-1) as {status: string}).status, 'synced');
+    const firstData = first.data as unknown as AppData;
+    assert.deepEqual(firstData.HoldCarrySnapshots?.['02.2026'].rows, source.Hold_AE.data);
+    const count = h.commits;
+    h.resetDevice();
+    second = h.client({...structuredClone(INITIAL_APP_DATA)}, false, async data => restoreSavedDeductions(data));
+    await second.engine.start(); await second.engine.flush();
+    assert.deepEqual(second.data.HoldCarrySnapshots, first.data.HoldCarrySnapshots);
+    assert.equal(h.commits, count, 'opening a saved month on another machine creates no new revisions');
+    first.edit('HoldCarrySnapshots', {});
+    await first.engine.flush();
+    await second.engine.retry();
+    assert.deepEqual(second.data.HoldCarrySnapshots, {}, 'remote Delete saved is authoritative');
+  } finally {first.engine.stop(); second?.engine.stop();}
 });
