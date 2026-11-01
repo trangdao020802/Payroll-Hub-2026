@@ -72,10 +72,10 @@ test("reads CHARGE TO CENTER from a Q_ROSTER sheet and converts it to L07", () =
   assert.equal(row.business, "AHN");
 });
 
-function updatedRoster(fileName = 'North.MKT Roster 21092025.xlsx', allocationHeader?: string) {
+function updatedRoster(fileName = 'North.MKT Roster 21092025.xlsx', allocationHeader?: string, allocationValue = '27') {
   const headers = ['', 'ID', 'Name', 'Date', 'Code', 'Class', 'From', 'To', 'Duration', 'Notes', 'Hour', 'Total'];
   const row: Array<string | number> = ['MKT North', '001234567890', 'TEST PERSON', '21/09/2026', 'LPAR01', 'Vu Tong Phan', '08:00', '12:00', '4:00', 'Test notes', 4, 80000];
-  if (allocationHeader) {headers.push(allocationHeader); row.push('27');}
+  if (allocationHeader) {headers.push(allocationHeader); row.push(allocationValue);}
   const buffer = createWorkbookBuffer('Roster', [headers, row]);
   return prepareExcelResult(parseExcelData(buffer, fileName), fileName, 'mkt-file', 'roster').rows;
 }
@@ -145,6 +145,19 @@ test('legacy North rows continue to use Center and explicit charge columns befor
   assert.equal(getTimesheetChargeToCenter(row), 'HN0018.VTP');
   assert.equal(getTimesheetChargeToCenter({...row, 'CHARGE TO CENTER': 'Dong Anh'}), 'HN0033.DAH');
   assert.equal(getTimesheetChargeToCenter({...row, Center: '', Class: '27'}), 'HN0027.OPK');
+});
+
+test('Center or L07 equal to the MKT LOCAL NORTH group leaves Class as the allocation destination', () => {
+  for (const fileName of ['North.MKT Roster 21092025.xlsx', 'Updated Roster.xlsx']) {
+    for (const groupHeader of ['CENTER', 'L07']) {
+      const row = updatedRoster(fileName, groupHeader, 'MKT LOCAL NORTH')[0];
+      assert.equal(row.l07, 'MKT LOCAL NORTH', `${fileName}: ${groupHeader}`);
+      assert.equal(row.chargeToCenterMkt, 'HN0018.VTP', `${fileName}: ${groupHeader}`);
+      assert.equal(row.class, 'Vu Tong Phan');
+    }
+  }
+  assert.equal(getTimesheetChargeToCenter({l07: 'MKT LOCAL NORTH', center: 'MKT LOCAL NORTH', chargeToCenterMkt: 'MKT LOCAL NORTH', Class: 'An Hung'}), 'HN0031.AHG');
+  assert.equal(getTimesheetChargeToCenter({l07: 'MKT LOCAL NORTH', center: 'MKT LOCAL NORTH', Class: 'An Hung', 'Charge to Center': 'Dong Anh'}), 'HN0033.DAH');
 });
 
 test("numeric charge destinations are normalized even in ordinary Raw Data files", () => {

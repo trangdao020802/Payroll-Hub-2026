@@ -50,7 +50,7 @@ Dùng cùng tài khoản Payroll để mở số liệu và các tháng đã lư
 
 Trong sheet Roster của nguồn có L07 **MKT LOCAL NORTH**, cột **Class**, **Charge to Center** hoặc **Center** đều dùng để đọc **Charge to Center MKT**. Ví dụ `Vu Tong Phan` được quy đổi thành `HN0018.VTP`; cột Class gốc vẫn được giữ để tra soát. Code/Type, ngày, giờ và các quy tắc tính hiện có tiếp tục được áp dụng.
 
-Với mẫu có nhiều cột phân bổ, các cột Charge to Center và Center cũ vẫn được ưu tiên trước Class. Giá trị phân bổ đã chỉnh tay, kể cả chủ động để trống, được giữ khi tính lại. Class của Roster trung tâm thông thường không được đổi thành cột phân bổ MKT.
+Khi **Center/L07 = MKT LOCAL NORTH**, đây là nhóm nguồn; **Class**, **Charge to Center** và **Charge to Center MKT** là tên tương đương của trung tâm nhận chi phí. Nếu có cột Charge to Center riêng thì vẫn ưu tiên giá trị đó. Mẫu cũ dùng Center chứa trung tâm nhận chi phí cụ thể vẫn được đọc như trước. Giá trị phân bổ đã chỉnh tay, kể cả chủ động để trống, được giữ khi tính lại. Class của Roster trung tâm thông thường không được đổi thành cột phân bổ MKT.
 
 ## Lưu ý Quan trọng khi Deploy lên Vercel và Đồng bộ Supabase
 

@@ -48,24 +48,28 @@ export function mapExcelRosterRow(
 
   const centerInfo = getCenterInfoByAECode(rawCenter);
   const fileL07 = getL07FromFileName(fileName || "");
+  const groupL07 = getCenterInfoByAECode(String(getVal(row, ['l07']) || ''))?.l07;
+  const isNorthSource = centerInfo?.l07 === 'MKT LOCAL NORTH' || groupL07 === 'MKT LOCAL NORTH' || fileL07 === 'MKT LOCAL NORTH';
   const regionalMktL07 = resolveNorthMktLocalL07(
     `${fileName || ""} ${rawCenter} ${rawChargeToCenter}`,
   );
   const isMktFile = /MKT|MARKETING/i.test(fileName || "");
-  const mktChargeSource = rawChargeToCenter || rawCenter;
+  const classCharge = isNorthSource && (!rawCenter || centerInfo?.l07 === 'MKT LOCAL NORTH')
+    ? String(getVal(row, ['class']) || '').trim() : '';
+  const mktChargeSource = rawChargeToCenter || classCharge || rawCenter;
   const resolvedMktCharge = resolveMktRosterCenter(mktChargeSource);
 
   let l07 = centerInfo?.l07 || fileL07 || rawCenter || "UNKNOWN";
   let chargeToCenterMkt = resolveMktRosterCenter(rawChargeToCenter).chargeToCenterMkt;
 
-  if (isMktFile || regionalMktL07) {
-    l07 = regionalMktL07 || fileL07 || "MKT LOCAL NORTH";
+  if (isMktFile || regionalMktL07 || isNorthSource) {
+    l07 = regionalMktL07 || (groupL07 === 'MKT LOCAL NORTH' ? groupL07 : fileL07) || "MKT LOCAL NORTH";
     chargeToCenterMkt =
       resolvedMktCharge.chargeToCenterMkt || mktChargeSource;
   }
 
   const business = getBusinessFromL07(
-    (isMktFile || regionalMktL07) && chargeToCenterMkt
+    (isMktFile || regionalMktL07 || isNorthSource) && chargeToCenterMkt
       ? resolvedMktCharge.l07 || chargeToCenterMkt
       : l07,
   );

@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as XLSX from "xlsx";
 import { mapExcelRosterRow } from "../lib/utils/roster-row-utils";
+import { mapL07 } from '../lib/utils/center-utils';
 import {
   createStableTimesheetRowId,
   dedupeTimesheetRosterRows,
@@ -246,13 +247,16 @@ export function parseExcelData(
             ['chargetocenter', 'chargetocentermkt', 'chargetocentermktname'].includes(k.toLowerCase().replace(/[\s_]+/g, '')));
           if (!hasChargeToCenter) {
             const centerKey = keys.find(k => k.toLowerCase().trim() === "center");
-            if (centerKey) {
+            const classKey = keys.find(k => k.toLowerCase().trim() === "class");
+            if (centerKey && mapL07(String(cleaned[centerKey])) === 'MKT LOCAL NORTH' && classKey) {
+              // Center identifies the source group; Class is the destination.
+              cleaned['Charge to Center MKT'] = cleaned[classKey];
+            } else if (centerKey) {
               cleaned["Charge to Center"] = cleaned[centerKey];
               delete cleaned[centerKey];
             } else {
               // Updated North MKT Roster uses Class for the charge destination.
               // Keep the original Class and all older allocation aliases intact.
-              const classKey = keys.find(k => k.toLowerCase().trim() === "class");
               if (classKey) cleaned["Charge to Center MKT"] = cleaned[classKey];
             }
           }
