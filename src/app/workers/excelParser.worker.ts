@@ -242,12 +242,18 @@ export function parseExcelData(
 
           // In MKT Local North ROSTER/Q_ROSTER, CENTER and CHARGE TO
           // CENTER are aliases for the allocation code that resolves to L07.
-          const hasChargeToCenter = keys.some(k => k.toLowerCase().trim().includes("charge to center"));
+          const hasChargeToCenter = keys.some(k => k.toLowerCase().trim().includes("charge to center") ||
+            ['chargetocenter', 'chargetocentermkt', 'chargetocentermktname'].includes(k.toLowerCase().replace(/[\s_]+/g, '')));
           if (!hasChargeToCenter) {
             const centerKey = keys.find(k => k.toLowerCase().trim() === "center");
             if (centerKey) {
               cleaned["Charge to Center"] = cleaned[centerKey];
               delete cleaned[centerKey];
+            } else {
+              // Updated North MKT Roster uses Class for the charge destination.
+              // Keep the original Class and all older allocation aliases intact.
+              const classKey = keys.find(k => k.toLowerCase().trim() === "class");
+              if (classKey) cleaned["Charge to Center MKT"] = cleaned[classKey];
             }
           }
         }

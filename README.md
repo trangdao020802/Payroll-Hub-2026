@@ -46,6 +46,12 @@ Nếu máy tính của bạn đã cài đặt Node.js và bạn muốn deploy qu
 
 Dùng cùng tài khoản Payroll để mở số liệu và các tháng đã lưu trên máy khác. Xem [cách lưu, đồng bộ và xử lý lỗi](docs/cloud-workspace.md), bao gồm kiểm thử và giới hạn xác minh.
 
+## Raw Data Timesheet · MKT Local North
+
+Trong sheet Roster của nguồn có L07 **MKT LOCAL NORTH**, cột **Class**, **Charge to Center** hoặc **Center** đều dùng để đọc **Charge to Center MKT**. Ví dụ `Vu Tong Phan` được quy đổi thành `HN0018.VTP`; cột Class gốc vẫn được giữ để tra soát. Code/Type, ngày, giờ và các quy tắc tính hiện có tiếp tục được áp dụng.
+
+Với mẫu có nhiều cột phân bổ, các cột Charge to Center và Center cũ vẫn được ưu tiên trước Class. Giá trị phân bổ đã chỉnh tay, kể cả chủ động để trống, được giữ khi tính lại. Class của Roster trung tâm thông thường không được đổi thành cột phân bổ MKT.
+
 ## Lưu ý Quan trọng khi Deploy lên Vercel và Đồng bộ Supabase
 
 Khi deploy ứng dụng lên Vercel, nếu bạn gặp lỗi không thể lưu dữ liệu hay đồng bộ (sync) lên Supabase, nguyên nhân phổ biến nhất là **thiếu hoặc chưa cấu hình đúng các Biến Môi trường (Environment Variables)** trên bảng điều khiển (Dashboard) của Vercel.

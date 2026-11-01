@@ -1,4 +1,4 @@
-import { getBusinessFromL07, mapL07, resolveMktRosterCenter } from "./center-utils";
+import { getBusinessFromL07, getL07FromFileName, mapL07, resolveMktRosterCenter } from "./center-utils";
 import { getVal, parseMoneyToNumber } from "./data-utils";
 import { createStableTimesheetRowId } from "./timesheet-roster-utils";
 
@@ -10,9 +10,22 @@ export function getRosterSourceKey(row: Row): string {
     || createStableTimesheetRowId(row, row._rowId || row._sourceFile || "roster"));
 }
 
-export function getTimesheetChargeToCenter(row: Row): string {
-  const value = row.chargeToCenterMkt ?? row.charge_to_center_mkt
+export function getTimesheetChargeToCenter(row: Row, configuredL07 = ""): string {
+  let value = row.chargeToCenterMkt ?? row.charge_to_center_mkt
     ?? getVal(row, ["charge to center mkt", "charge to center", "chargetocenter", "charge to center mkt name"]);
+  if (row._chargeToCenterMktOverride !== undefined) value = row._chargeToCenterMktOverride;
+  const explicitBlank = row.chargeToCenterMkt === "" && row.charge_to_center_mkt === "";
+  if (!String(value ?? "").trim() && row._chargeToCenterMktOverride === undefined && !explicitBlank) {
+    const scope = String(configuredL07 || row._l07Override || row.l07 || row.L07 ||
+      getVal(row, ["bank", "bank name", "center"]) || "").trim();
+    const source = String(row._sourceFile || "");
+    const sourceL07 = /SOUTH/i.test(source) ? "" : getL07FromFileName(source);
+    const l07 = mapL07(scope && scope !== "UNKNOWN" ? scope : sourceL07);
+    if (!/SOUTH/i.test(scope) && l07 === "MKT LOCAL NORTH") {
+      const center = String(getVal(row, ['center']) || '').trim();
+      value = center && mapL07(center) !== 'MKT LOCAL NORTH' ? center : getVal(row, ["class"]);
+    }
+  }
   return resolveMktRosterCenter(String(value ?? "")).chargeToCenterMkt;
 }
 
@@ -55,6 +68,7 @@ export function applyTimesheetRosterCellEdit(row: Row, field: string, value: unk
   if (aliases === FIELD_ALIASES[0]) {
     next.chargeToCenterMkt = finalValue;
     next.charge_to_center_mkt = finalValue;
+    next._chargeToCenterMktOverride = finalValue;
     next.business = getBusinessFromL07(String(finalValue));
   }
   if (field === "l07" || field === "center") {

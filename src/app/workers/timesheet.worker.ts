@@ -186,7 +186,7 @@ export function calculateTimesheet(params: any) {
 
     let rawType = String(getVal(t, ["type", "code", "task code", "activity code", "type code", "type_code", "typecode", "task type", "task", "loại", "loại hoạt động", "event type", "activity", "category", "task type name", "taskType"]) || "").trim();
     let rCen = String(t.center || "").trim();
-    const rawChargeToCenter = getTimesheetChargeToCenter(t);
+    const rawChargeToCenter = getTimesheetChargeToCenter(t, configuredL07);
     const rawAeCode = String(t.maAE || "").trim();
 
     const sourceFile = t._sourceFile || "";

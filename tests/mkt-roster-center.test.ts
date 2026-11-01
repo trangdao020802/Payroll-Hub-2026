@@ -11,6 +11,7 @@ import {
 } from "../src/app/workers/excelParser.worker";
 import { calculateTimesheet } from "../src/app/workers/timesheet.worker";
 import { TASK_COLUMNS } from "../src/app/constants/timesheet-logic";
+import { applyTimesheetRosterCellEdit, getTimesheetChargeToCenter } from '../src/app/lib/utils/timesheet-edits';
 
 function createWorkbookBuffer(
   sheetName: string,
@@ -69,6 +70,81 @@ test("reads CHARGE TO CENTER from a Q_ROSTER sheet and converts it to L07", () =
   assert.equal(row.l07, "MKT LOCAL NORTH");
   assert.equal(row.chargeToCenterMkt, "HN0016.PDP");
   assert.equal(row.business, "AHN");
+});
+
+function updatedRoster(fileName = 'North.MKT Roster 21092025.xlsx', allocationHeader?: string) {
+  const headers = ['', 'ID', 'Name', 'Date', 'Code', 'Class', 'From', 'To', 'Duration', 'Notes', 'Hour', 'Total'];
+  const row: Array<string | number> = ['MKT North', '001234567890', 'TEST PERSON', '21/09/2026', 'LPAR01', 'Vu Tong Phan', '08:00', '12:00', '4:00', 'Test notes', 4, 80000];
+  if (allocationHeader) {headers.push(allocationHeader); row.push('27');}
+  const buffer = createWorkbookBuffer('Roster', [headers, row]);
+  return prepareExcelResult(parseExcelData(buffer, fileName), fileName, 'mkt-file', 'roster').rows;
+}
+
+test('updated North MKT Roster reads Class as charge destination while retaining Class, Code/Type and duration', () => {
+  const rows = updatedRoster();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].l07, 'MKT LOCAL NORTH');
+  assert.equal(rows[0].chargeToCenterMkt, 'HN0018.VTP');
+  assert.equal(rows[0].class, 'Vu Tong Phan');
+  assert.equal(rows[0].Class, 'Vu Tong Phan');
+  assert.equal(rows[0].type, 'LPAR01');
+  assert.equal(rows[0].duration, 4);
+  assert.equal(rows[0].ma_nv, '001234567890');
+});
+
+test('existing CENTER and charge columns keep priority over the new Class fallback', () => {
+  for (const header of ['CENTER', 'CHARGE TO CENTER', 'Charge to Center MKT', 'CHARGETOCENTER']) {
+    const row = updatedRoster(undefined, header)[0];
+    assert.equal(row.chargeToCenterMkt, 'HN0027.OPK', header);
+    assert.equal(row.class, 'Vu Tong Phan', header);
+  }
+});
+
+test('new Class allocations flow through the actual Timesheet calculation into destination salary totals', () => {
+  const result = calculateTimesheet({
+    rosterData: updatedRoster(), salaryScaleData: [], staffData: [], cacheData: [],
+    fromDateStr: '2026-09-01', toDateStr: '2026-09-30', preferredYear: 2026,
+    appData: {Timesheet_InputList: [{id: 'mkt-file', l07: 'MKT LOCAL NORTH'}]},
+    checkTAsMap: {}, classSizeMap: {}, TASK_COLUMNS,
+  });
+  assert.equal(result.processedRosterData[0].chargeToCenterMkt, 'HN0018.VTP');
+  assert.equal(result.processedRosterData[0].taskType, 'LPAR01');
+  assert.equal(result.centerSummary.length, 1);
+  assert.equal(result.centerSummary[0].l07, 'HN0018.VTP');
+  assert.equal(result.centerSummary[0].chargeMktLocal, 80000);
+});
+
+test('configured L07 enables Class allocation even for a generically named imported Roster', () => {
+  const rows = updatedRoster('Updated Roster.xlsx');
+  assert.equal(rows[0].chargeToCenterMkt, '');
+  const result = calculateTimesheet({
+    rosterData: rows, salaryScaleData: [], staffData: [], cacheData: [],
+    fromDateStr: '2026-09-01', toDateStr: '2026-09-30', preferredYear: 2026,
+    appData: {Timesheet_InputList: [{id: 'mkt-file', l07: 'MKT LOCAL NORTH'}]},
+    checkTAsMap: {}, classSizeMap: {}, TASK_COLUMNS,
+  });
+  assert.equal(result.processedRosterData[0].l07, 'MKT LOCAL NORTH');
+  assert.equal(result.processedRosterData[0].chargeToCenterMkt, 'HN0018.VTP');
+  assert.equal(result.centerSummary[0].chargeMktLocal, 80000);
+});
+
+test('Class is not a global charge alias and explicit allocation edits, including clearing, survive reload', () => {
+  const row = {l07: 'MKT LOCAL NORTH', Class: 'An Hung'};
+  assert.equal(getTimesheetChargeToCenter(row), 'HN0031.AHG');
+  assert.equal(getTimesheetChargeToCenter({...row, l07: 'HN0001.PHY'}), '');
+  assert.equal(getTimesheetChargeToCenter({...row, l07: 'MKT LOCAL SOUTH'}), '');
+  const edited = applyTimesheetRosterCellEdit(row, 'chargeToCenterMkt', 'Hai Phong');
+  assert.equal(getTimesheetChargeToCenter(JSON.parse(JSON.stringify(edited))), 'Hai Phong');
+  const cleared = applyTimesheetRosterCellEdit(edited, 'chargeToCenterMkt', '');
+  assert.equal(getTimesheetChargeToCenter(JSON.parse(JSON.stringify(cleared))), '');
+  assert.equal(getTimesheetChargeToCenter({...row, chargeToCenterMkt: '', charge_to_center_mkt: ''}), '');
+});
+
+test('legacy North rows continue to use Center and explicit charge columns before the equivalent Class alias', () => {
+  const row = {l07: 'MKT LOCAL NORTH', Class: 'An Hung', Center: 'Vu Tong Phan'};
+  assert.equal(getTimesheetChargeToCenter(row), 'HN0018.VTP');
+  assert.equal(getTimesheetChargeToCenter({...row, 'CHARGE TO CENTER': 'Dong Anh'}), 'HN0033.DAH');
+  assert.equal(getTimesheetChargeToCenter({...row, Center: '', Class: '27'}), 'HN0027.OPK');
 });
 
 test("numeric charge destinations are normalized even in ordinary Raw Data files", () => {
