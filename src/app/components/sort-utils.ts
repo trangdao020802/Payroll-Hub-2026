@@ -1,5 +1,12 @@
 export type SortDirection = "asc" | "desc";
 
+// localeCompare(locale, options) otherwise constructs a collator for every
+// comparison: hundreds of thousands of allocations when a period is sorted.
+const tableTextCollator = new Intl.Collator('vi', { numeric: true, sensitivity: 'base' });
+const filterValueCollator = new Intl.Collator(undefined, { numeric: true });
+export const compareTableText = (left: unknown, right: unknown) => tableTextCollator.compare(String(left), String(right));
+export const compareFilterValues = (left: unknown, right: unknown) => filterValueCollator.compare(String(left), String(right));
+
 export interface SortRule {
   key: string;
   direction: SortDirection;

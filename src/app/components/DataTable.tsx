@@ -79,7 +79,7 @@ import { Checkbox } from "./ui/checkbox";
 import { Input } from "./ui/input";
 import { SaveStatusCard } from "./shared/SaveStatusCard";
 import { CustomSortDialog } from "./CustomSortDialog";
-import { normalizeSortRules, type SortRule } from "./sort-utils";
+import { compareTableText, compareFilterValues, normalizeSortRules, type SortRule } from "./sort-utils";
 
 const AUTO_FIT_SAMPLE_LIMIT = 320;
 const COLUMN_FILTER_SCAN_CHUNK_SIZE = 2_000;
@@ -479,9 +479,7 @@ const ColumnFilter = ({
         nextValues.sort((left: any, right: any) => {
           if (left === "undefined") return -1;
           if (right === "undefined") return 1;
-          return String(left).localeCompare(String(right), undefined, {
-            numeric: true,
-          });
+          return compareFilterValues(left, right);
         });
       }
 
@@ -1904,6 +1902,21 @@ export const DataTable = React.forwardRef<DataTableRef, DataTableProps>(
       // higher priority; empty values stay at the bottom at every level.
       if (sortConfig.length > 0 || containsSubtotalRows) {
         if (result === data) result = [...result];
+        const effectiveRules = sortConfig.map(rule => {
+          const col = columns.find(column => column.key === rule.key);
+          const type = columnTypes[rule.key] || col?.type || 'text';
+          return { ...rule, numeric: ['number', 'currency', 'money'].includes(type),
+            date: type === 'date' || isDateColumn(rule.key, col?.label, type) };
+        });
+        const parsedValues = new WeakMap<object, Map<string, number | undefined>>();
+        const parsed = (row: any, rule: (typeof effectiveRules)[number]) => {
+          let values = parsedValues.get(row);
+          if (!values) { values = new Map(); parsedValues.set(row, values); }
+          if (!values.has(rule.key)) values.set(rule.key, rule.numeric
+            ? parseMoneyToNumber(row[rule.key]) || 0 : parseAnyDate(row[rule.key])?.getTime());
+          return values.get(rule.key);
+        };
+        const groupDirection = sortConfig.find(rule => rule.key === 'business')?.direction || 'asc';
         result.sort((a, b) => {
           if (Boolean(a._matchingDeduction) !== Boolean(b._matchingDeduction)) return a._matchingDeduction ? -1 : 1;
           const aNeedsSourceNote = Boolean(a._needsSheetSourceNote);
@@ -1915,19 +1928,12 @@ export const DataTable = React.forwardRef<DataTableRef, DataTableProps>(
           // Roster Center subtotal rows remain attached to their BU while the
           // rows inside each BU still follow all selected sort levels.
           if (a._subtotalGroup != null && b._subtotalGroup != null) {
-            const groupDirection = sortConfig.find((rule) => rule.key === "business")?.direction || "asc";
-            const groupCompare = String(a._subtotalGroup).localeCompare(
-              String(b._subtotalGroup),
-              "vi",
-              { numeric: true, sensitivity: "base" },
-            );
+            const groupCompare = compareTableText(a._subtotalGroup, b._subtotalGroup);
             if (groupCompare !== 0) return groupDirection === "asc" ? groupCompare : -groupCompare;
             if (!!a._isSubtotal !== !!b._isSubtotal) return a._isSubtotal ? 1 : -1;
           }
 
-          for (const rule of sortConfig) {
-            const col = columns.find((column) => column.key === rule.key);
-            const type = columnTypes[rule.key] || col?.type || "text";
+          for (const rule of effectiveRules) {
             const aVal = a[rule.key];
             const bVal = b[rule.key];
             const isANull = aVal === null || aVal === undefined || aVal === "";
@@ -1938,19 +1944,13 @@ export const DataTable = React.forwardRef<DataTableRef, DataTableProps>(
             if (isBNull) return -1;
 
             let comparison = 0;
-            if (type === "number" || type === "currency" || type === "money") {
-              comparison = (parseMoneyToNumber(aVal) || 0) - (parseMoneyToNumber(bVal) || 0);
-            } else if (type === "date" || isDateColumn(rule.key, col?.label, type)) {
-              const aDate = parseAnyDate(aVal);
-              const bDate = parseAnyDate(bVal);
-              if (aDate && bDate) comparison = aDate.getTime() - bDate.getTime();
+            if (rule.numeric || rule.date) {
+              const left = parsed(a, rule), right = parsed(b, rule);
+              if (left !== undefined && right !== undefined) comparison = left - right;
             }
 
             if (comparison === 0) {
-              comparison = String(aVal).localeCompare(String(bVal), "vi", {
-                numeric: true,
-                sensitivity: "base",
-              });
+              comparison = compareTableText(aVal, bVal);
             }
             if (comparison !== 0) return rule.direction === "asc" ? comparison : -comparison;
           }

@@ -223,3 +223,49 @@ for the shared Promotion workspace. The existing payroll cloud, transaction
 history and atomic identity-sync database tests also pass. Production inspection
 uses only project health, migration metadata, logs and advisors; payroll rows and
 schema are not changed by this repository repair.
+
+### 2026-11-02: responsive workspace opening and Timesheet period filters
+
+Large cloud fields and cached IndexedDB tables previously materialized as a
+single worker message or on the window thread. Cache persistence could then
+clone the newly restored large tables while login was still fetching and
+checking history. Opening now reads large split cache keys inside the data
+worker and reconstructs decoded objects in bounded, acknowledged chunks. The
+transport preserves nested tables, dates, files, undefined and imported keys.
+It rejects incomplete sequences and releases the idle worker heap. Cloud bytes,
+gzip envelopes, SHA-256 verification, ownership checks and server limits retain
+their existing format.
+
+Cloud downloads fetch at most four ordered parts concurrently. Up to eight tiny
+fields share a batch, with a 1 MB compressed batch budget; larger fields decode
+alone. The dialog shows cache, permission, backup, download and history phases.
+Cache reads and cross-tab lock acquisition have deadlines and an explicit retry;
+an unread cache stays protected instead of being replaced. Required pre-login
+backups propagate storage failures. Local cache writes wait until the verified
+restore opens. Ae_Global_Inputs uses a separate immutable IndexedDB key, retaining
+its files and durable hash so another metadata edit need not clone or redownload
+that large collection. Legacy metadata remains a one-time fallback.
+
+After the cloud revision and saved monthly history are installed and rechecked,
+the UI can open while an automatic cache/history upgrade uploads. Its status is
+still Saving, and explicit Save continues to await the real cloud commit. This
+does not certify stale/offline cache or unlock an incomplete restore.
+
+Changing a Timesheet period previously replaced Raw Data with the full unfiltered
+source while calculations ran, then retransmitted that source to a fresh worker.
+Raw Data now waits for the calculated period, with a visible retry on worker
+failure. The resident calculation worker reuses immutable source rows, coalesces
+obsolete queued ranges, sends bounded results and releases its source on edits,
+imports, hiding or unmount. Table sorting reuses collators and parses each sort
+value once per row, preserving date, numeric, empty and subtotal ordering.
+
+Verification includes real worker decode/cache transport, corrupt-part rejection
+and retry, storage lock timeout, mandatory backup failure, multi-device restore
+and revision checks, Save waiting on slow uploads, calculation-worker reuse,
+rapid range changes, source edits and preserved payroll totals. A separate real
+worker stress run used 60,000 synthetic source rows through four 21–20 period
+selections: 15,000 / 30,000 / 15,000 / 15,000 rows were returned with one source
+upload. Its main-thread heartbeat continued with a maximum measured gap of 14 ms
+in this environment. A local interactive browser remains unavailable; these
+checks do not exercise the owner's signed-in computers. Production inspection
+reads metadata only; payroll data, schema and saved Deductions are not rewritten.

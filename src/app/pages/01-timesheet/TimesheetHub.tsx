@@ -1,4 +1,4 @@
-import { applyTimesheetPivotEdit, applyTimesheetRosterCellEdit, getRosterSourceKey, normalizeTimesheetAllocation } from "../../lib/utils/timesheet-edits";
+import { applyTimesheetPivotEdit, applyTimesheetRosterCellEdit, getRosterSourceKey } from "../../lib/utils/timesheet-edits";
 import { useMissingTimesheetCenters } from "../../hooks/useMissingTimesheetCenters";
 import { SupabaseSchemaError } from '../../lib/utils/supabase-sync-errors';
 import { useTableRestore } from '../../hooks/useTableRestore';
@@ -821,7 +821,7 @@ export function TimesheetHub() {
   const calculatedStaffData = useMemo(() => appData.Q_Staff || [], [appData.Q_Staff]);
   const calculatedCacheData = useMemo(() => appData.Q_Cache || [], [appData.Q_Cache]);
 
-  const { processedRosterData, employeeSummary, centerSummary, isCalculating } =
+  const { processedRosterData, employeeSummary, centerSummary, isCalculating, error: calculationError, retry: retryCalculation } =
     useTimesheetCalculations(
       calculatedRosterData,
       calculatedSalaryScaleData,
@@ -897,9 +897,9 @@ export function TimesheetHub() {
   const currentData = useMemo(() => {
     if (view !== "final") return [];
     if (activeTab === "roster_raw") {
-      // Raw Data should be usable immediately while the calculation worker is
-      // still enriching rows in the background.
-      return isCalculating ? calculatedRosterData.map(normalizeTimesheetAllocation) : processedRosterData;
+      // Never substitute the complete, unfiltered source during a period
+      // calculation. That expands the table and clones every source row again.
+      return processedRosterData;
     }
     if (activeTab === "employee") return displayEmployeeSummary;
     if (activeTab === "center") return displayCenterSummary;
@@ -2399,7 +2399,12 @@ export function TimesheetHub() {
                       )}
 
                       {/* Sync/Load Indicator */}
-                      {(isCalculating && activeTab !== "roster_raw") || isPending ? (
+                      {calculationError ? (
+                        <div role="alert" className="p-6 text-sm text-red-700">
+                          <p>{calculationError}</p>
+                          <button className="mt-3 rounded-full border px-3 py-2" onClick={retryCalculation}>Thử lại</button>
+                        </div>
+                      ) : isCalculating || isPending ? (
                         <div className="flex-1 flex flex-col items-center justify-center bg-card/60 relative z-10 p-12">
                           <div className="relative">
                             <div className="w-12 h-12 border-3 border-accent/20 border-t-accent rounded-full animate-spin" />

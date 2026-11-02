@@ -864,6 +864,8 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
     params: any;
     data: Record<(typeof inputFields)[number], any[]>;
   } | null = null;
+  let sourceData: Record<(typeof inputFields)[number], any[]> | null = null;
+  let recalculateTimer: ReturnType<typeof setTimeout> | undefined;
 
   const resultFields = ["processedRosterData", "employeeSummary", "centerSummary"] as const;
   let pendingOutput: {
@@ -881,7 +883,7 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
         output.offset = 0;
         continue;
       }
-      const end = Math.min(output.offset + 2_000, rows.length);
+      const end = Math.min(output.offset + 500, rows.length);
       self.postMessage({ type: "timesheet-result-chunk", requestId: output.requestId,
         field, chunkId: ++output.chunkId, rows: rows.slice(output.offset, end) });
       // postMessage has cloned these rows. Release them in this worker before
@@ -932,6 +934,24 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
   self.onmessage = (e: MessageEvent) => {
     const message = e.data || {};
 
+    if (message.type === 'timesheet-cancel-result') {
+      pendingOutput = null;
+      clearTimeout(recalculateTimer);
+      return;
+    }
+    if (message.type === 'timesheet-recalculate') {
+      pendingOutput = null;
+      if (!sourceData) {
+        postChunkedResult({ error: 'Chưa nạp xong dữ liệu Timesheet.' }, message.requestId, true);
+        return;
+      }
+      clearTimeout(recalculateTimer);
+      recalculateTimer = setTimeout(() => {
+        if (sourceData) postChunkedResult(calculateTimesheet({ ...message.params, ...sourceData }), message.requestId, true);
+      }, 40);
+      return;
+    }
+
     if (message.type === "timesheet-result-ack") {
       if (pendingOutput?.requestId === message.requestId && pendingOutput?.chunkId === message.chunkId) sendNextResultChunk();
       return;
@@ -939,6 +959,8 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
 
     if (message.type === "timesheet-input-start") {
       pendingOutput = null;
+      clearTimeout(recalculateTimer);
+      sourceData = null;
       pendingInput = {
         requestId: message.requestId,
         params: message.params || {},
@@ -963,6 +985,7 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
       if (!pendingInput || pendingInput.requestId !== message.requestId) return;
       const request = pendingInput;
       pendingInput = null;
+      sourceData = request.data;
       postChunkedResult(
         calculateTimesheet({ ...request.params, ...request.data }),
         request.requestId,

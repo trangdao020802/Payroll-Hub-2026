@@ -34,6 +34,8 @@ import { createLatestTaskQueue } from "../utils/latest-task-queue";
 import { CLOUD_HASHES_KEY, CLOUD_CACHE_EVENT, persistedFieldHashes, restoreFieldHashes, prepareHydrationTables, withAppStorageLock, type StoredCloudHashes } from "../cloud/field-cache";
 import { OWNER_KEY } from "../cloud/engine";
 import { captureSavedDeductions, protectSavedDeductions, restoreSavedDeductions, type DeductionsWriteOptions } from '../utils/deductions-lock';
+import { withDeadline } from '../cloud/deadline';
+import { CloudRepository } from '../cloud/repository';
 
 // Configure localforage
 localforage.config({
@@ -57,6 +59,7 @@ const SPLIT_STORAGE_FIELDS = [
   "Timesheet_RosterEditHistory",
   "TA_Employee_Summary",
   "TA_Center_Summary",
+  "Ae_Global_Inputs",
 ] as const satisfies readonly (keyof AppData)[];
 
 const getSplitStorageKey = (field: keyof AppData) =>
@@ -70,10 +73,13 @@ interface AppDataCtx {
   rawAppData: AppData;
   isStorageHydrating: boolean;
   hasStoredData: boolean;
+  storageHydrationMessage: string;
+  storageHydrationError: string;
 }
 
 interface AppActionsCtx {
   setCloudRestorePending: (pending: boolean) => void;
+  retryStorageHydration: () => void;
   applyCloudData: (updater: (data: AppData) => AppData) => Promise<void>;
   updateAppData: (
     updater: ((prev: AppData) => AppData) | Partial<AppData>,
@@ -108,6 +114,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
   const [isStorageHydrating, setIsStorageHydrating] = useState(true);
   const [hasStoredData, setHasStoredData] = useState(false);
+  const [storageHydrationMessage, setStorageHydrationMessage] = useState('Đang mở dữ liệu trên máy…');
+  const [storageHydrationError, setStorageHydrationError] = useState('');
+  const hydrationRetryRef = useRef<(() => void) | null>(null);
+  const retryStorageHydration = useCallback(() => hydrationRetryRef.current?.(), []);
   const [activePathname, setActivePathname] = useState(() =>
     typeof window === "undefined" ? "/" : window.location.pathname,
   );
@@ -119,8 +129,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   const lastAutoSnapshotTimeRef = useRef<number>(0);
   const cloudApplyResolvers = useRef<Array<() => void>>([]);
   const cloudRestorePendingRef = useRef(false);
+  const [isCloudRestorePending, setIsCloudRestorePending] = useState(false);
   const setCloudRestorePending = useCallback((pending: boolean) => {
     cloudRestorePendingRef.current = pending;
+    setIsCloudRestorePending(pending);
   }, []);
   const [cloudCacheVersion, setCloudCacheVersion] = useState(0);
   useLayoutEffect(() => {
@@ -150,7 +162,12 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
   // ── Load from storage on mount ──
   useEffect(() => {
+    let running = false;
+    const readStored = <T,>(key: string) => withDeadline(() => localforage.getItem<T>(key),
+      'Mở dữ liệu trên máy quá lâu. Bấm Thử mở lại để tiếp tục; dữ liệu chưa được thay thế.', 45000);
     const loadData = async () => {
+      let succeeded = false;
+      const cacheReader = new CloudRepository(localStorage.getItem(OWNER_KEY) || '');
       try {
         // The shell must remain interactive even when IndexedDB contains a very
         // large Timesheet snapshot. Release the global blocking loader first;
@@ -160,7 +177,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
         const hydratedSplitFields = new Set<keyof AppData>();
         const savedMetadata =
-          await localforage.getItem<Partial<AppData>>(STORAGE_META_KEY);
+          await readStored<Partial<AppData>>(STORAGE_META_KEY);
         let saved: AppData | null = null;
 
         // The old monolithic snapshot can contain hundreds of thousands of
@@ -169,7 +186,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         // Prefer the lightweight metadata snapshot and touch the legacy value
         // only for a one-time migration.
         if (!savedMetadata) {
-          saved = await localforage.getItem<AppData>(STORAGE_KEY);
+          saved = await readStored<AppData>(STORAGE_KEY);
           if (!saved) {
             const legacySaved = localStorage.getItem(STORAGE_KEY);
             if (legacySaved) {
@@ -191,10 +208,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
 
           const splitValues: Array<AppData[keyof AppData] | null> = [];
           for (const field of SPLIT_STORAGE_FIELDS) {
+            setStorageHydrationMessage(`Đang mở dữ liệu trên máy: ${splitValues.length + 1}/${SPLIT_STORAGE_FIELDS.length} phần…`);
             splitValues.push(
-              await localforage.getItem<AppData[typeof field]>(
-                getSplitStorageKey(field),
-              ),
+              await withDeadline(() => cacheReader.readCachedField<AppData[typeof field]>(getSplitStorageKey(field)),
+                'Mở dữ liệu trên máy quá lâu. Bấm Thử mở lại để tiếp tục; dữ liệu chưa được thay thế.', 45000),
             );
             // Do not deserialize every large IndexedDB value concurrently.
             // Yield between tables so navigation/clicks remain responsive for
@@ -209,9 +226,10 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
           let legacySplitFallback: AppData | null = null;
           if (
             savedMetadata &&
-            splitValues.some((value) => value === null || value === undefined)
+            splitValues.some((value, index) => (value === null || value === undefined)
+              && savedMetadata[SPLIT_STORAGE_FIELDS[index]] === undefined)
           ) {
-            legacySplitFallback = await localforage.getItem<AppData>(STORAGE_KEY);
+            legacySplitFallback = await readStored<AppData>(STORAGE_KEY);
             if (!legacySplitFallback) {
               const localFallback = localStorage.getItem(STORAGE_KEY);
               if (localFallback) {
@@ -233,7 +251,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
               (saved as any)[field] = legacySplitFallback[field];
             }
           });
-          const cached = await localforage.getItem<{ owner: string; hashes: Record<string, string> }>(CLOUD_HASHES_KEY);
+          const cached = await readStored<{ owner: string; hashes: Record<string, string> }>(CLOUD_HASHES_KEY);
           if (cached?.owner && cached.owner === localStorage.getItem(OWNER_KEY)) {
             // Register before migrations: any migrated/replaced value loses its
             // old hash automatically and is safely fetched again from cloud.
@@ -309,6 +327,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
           delete legacySaved.Q_RosterEditHistory;
 
           if (Array.isArray(saved.Timesheet_Roster)) {
+            setStorageHydrationMessage('Đang kiểm tra dữ liệu Timesheet trên máy…');
             const uniqueRoster = await dedupeTimesheetRosterRowsInChunks(
               saved.Timesheet_Roster,
             );
@@ -560,20 +579,37 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
             persistedSplitRefs.current.set(field, INITIAL_APP_DATA[field]);
           });
         }
+        succeeded = true;
       } catch (e) {
         console.error("Failed to load app data from storage", e);
+        setStorageHydrationError(e instanceof Error ? e.message : 'Không thể mở dữ liệu đã lưu trên máy.');
         toast.error("Không thể tải dữ liệu đã lưu.");
       } finally {
-        setIsStorageHydrating(false);
+        cacheReader.dispose();
+        // An unread cache may contain unsynced edits. Do not let a cloud pull
+        // overwrite it before it can be inspected and backed up successfully.
+        if (succeeded) setIsStorageHydrating(false);
         setIsLoading(false);
       }
     };
-    void withAppStorageLock(loadData);
+    const start = () => {
+      if (running) return;
+      running = true;
+      setStorageHydrationError('');
+      setStorageHydrationMessage('Đang mở dữ liệu trên máy…');
+      void withAppStorageLock(loadData, 30000).catch(error => {
+        setStorageHydrationError(error instanceof Error ? error.message : 'Không thể mở kho trên máy.');
+        setIsLoading(false);
+      }).finally(() => { running = false; });
+    };
+    hydrationRetryRef.current = start;
+    start();
+    return () => { hydrationRetryRef.current = null; };
   }, []);
 
   // ── Debounced sync to storage (1.5s) ──
   useEffect(() => {
-    if (isLoading || isStorageHydrating) return;
+    if (isLoading || isStorageHydrating || cloudRestorePendingRef.current) return;
 
     const saveData = async () => {
       setIsSyncing(true);
@@ -586,9 +622,6 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
         if (dataToSave.Timesheet_InputList)
           dataToSave.Timesheet_InputList =
             dataToSave.Timesheet_InputList.map(stripFileObj);
-        if (dataToSave.Ae_Global_Inputs)
-          dataToSave.Ae_Global_Inputs =
-            dataToSave.Ae_Global_Inputs.map(stripFileObj);
         const durableData = { ...dataToSave };
         const previousHashes = await localforage.getItem<StoredCloudHashes>(CLOUD_HASHES_KEY);
         const written = new Set<string>();
@@ -664,7 +697,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
       void persistenceQueueRef.current.enqueue(() => withAppStorageLock(saveData));
     }, persistImmediately ? 0 : 3000);
     return () => clearTimeout(id);
-  }, [state.present, isLoading, isStorageHydrating, cloudCacheVersion]);
+  }, [state.present, isLoading, isStorageHydrating, cloudCacheVersion, isCloudRestorePending]);
 
   // ── Default center seeding ──
   useEffect(() => {
@@ -894,13 +927,14 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const dataValue = useMemo<AppDataCtx>(
-    () => ({ appData: computedPresent, rawAppData: state.present, isLoading, isStorageHydrating, hasStoredData }),
-    [computedPresent, state.present, isLoading, isStorageHydrating, hasStoredData],
+    () => ({ appData: computedPresent, rawAppData: state.present, isLoading, isStorageHydrating, hasStoredData, storageHydrationMessage, storageHydrationError }),
+    [computedPresent, state.present, isLoading, isStorageHydrating, hasStoredData, storageHydrationMessage, storageHydrationError],
   );
 
   const actionsValue = useMemo<AppActionsCtx>(
     () => ({
       setCloudRestorePending,
+      retryStorageHydration,
       applyCloudData,
       updateAppData,
       undo,
@@ -911,6 +945,7 @@ export function AppDataProvider({ children }: { children: React.ReactNode }) {
     }),
     [
       setCloudRestorePending,
+      retryStorageHydration,
       applyCloudData,
       updateAppData,
       undo,

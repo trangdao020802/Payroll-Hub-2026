@@ -77,8 +77,8 @@ export function CloudSyncButton() {
   );
 }
 export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
-  const { rawAppData, isStorageHydrating } = useAppDataOnly();
-  const { applyCloudData, setCloudRestorePending } = useAppActions();
+  const { rawAppData, isStorageHydrating, storageHydrationMessage, storageHydrationError } = useAppDataOnly();
+  const { applyCloudData, setCloudRestorePending, retryStorageHydration } = useAppActions();
   const dataRef = useRef(rawAppData);
   useLayoutEffect(() => {
     dataRef.current = rawAppData;
@@ -138,8 +138,8 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
       applyCloudData,
       (next) => {
         if (alive) {
-          setState(previous => previous.status === next.status && previous.message === next.message && previous.updatedAt === next.updatedAt && previous.revision === next.revision && previous.conflicts === next.conflicts ? previous : next);
-          if (next.status === "synced") setUnlockedUser(user);
+          setState(previous => previous.status === next.status && previous.message === next.message && previous.updatedAt === next.updatedAt && previous.revision === next.revision && previous.conflicts === next.conflicts && previous.opened === next.opened ? previous : next);
+          if (next.status === "synced" || next.opened) setUnlockedUser(user);
         }
       },
       async () => {
@@ -147,6 +147,7 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
           title: "Bản máy chưa đồng bộ trước khi tải cloud",
           trigger: "restore",
           isPinned: true,
+          required: true,
         });
       },
       async data => {
@@ -341,8 +342,11 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
           ) : (
             <div className="space-y-3 text-sm">
               <p className="break-all text-muted-foreground">{user.email}</p>
-              <p role="status">{messages[state.status]}</p>
-              {state.message && (
+              <p role="status">{isStorageHydrating ? storageHydrationMessage : messages[state.status]}</p>
+              {isStorageHydrating && storageHydrationError && (
+                <p role="alert" className="text-red-700">{storageHydrationError}</p>
+              )}
+              {!isStorageHydrating && state.message && (
                 <p className="text-muted-foreground">{state.message}</p>
               )}
               {state.updatedAt && (
@@ -361,7 +365,10 @@ export function CloudWorkspaceProvider({ children }: { children: ReactNode }) {
                   Kết nối mạng rồi bấm Đồng bộ ngay để mở bản cloud mới nhất.
                 </p>
               )}
-              {state.status === "conflict" ? (
+              {isStorageHydrating ? (
+                <button className="rounded-full border px-3 py-2 disabled:opacity-50"
+                  disabled={!storageHydrationError} onClick={retryStorageHydration}>Thử mở lại</button>
+              ) : state.status === "conflict" ? (
                 <>
                   <p className="break-words text-xs">
                     {state.conflicts?.join(", ")}

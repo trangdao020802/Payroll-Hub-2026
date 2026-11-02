@@ -14,6 +14,22 @@ test("snapshot size estimation does not serialize every row of a large Timesheet
   assert.ok(visited <= 64, `size estimate serialized ${visited} rows`);
 });
 
+test('a required pre-login backup rejects a storage failure instead of allowing cloud to replace unsynced data', async t => {
+  t.mock.method(console, 'error', () => {});
+  const result = await build({ entryPoints: ['src/app/lib/utils/snapshot-manager.ts'], bundle: true,
+    write: false, platform: 'node', format: 'cjs', packages: 'external',
+    plugins: [{ name: 'failed-browser-storage', setup(builder) {
+      builder.onResolve({ filter: /^localforage$/ }, () => ({ path: 'storage', namespace: 'fixture' }));
+      builder.onLoad({ filter: /.*/, namespace: 'fixture' }, () => ({ contents: `
+        export default { createInstance() { return { setItem: async () => { throw new Error('storage full'); } }; } };
+      ` }));
+    } }],
+  });
+  const module = { exports: {} as { saveSnapshot: (data: AppData, options?: {required?: boolean}) => Promise<unknown> } };
+  new Function('require', 'module', 'exports', 'window', result.outputFiles[0].text)(createRequire(import.meta.url), module, module.exports, {});
+  await assert.rejects(module.exports.saveSnapshot({ Timesheet_Roster: [] } as unknown as AppData, {required: true}), /storage full/);
+});
+
 test("a successfully persisted snapshot is not retained as a second in-memory backup", async () => {
   const result = await build({
     stdin: { contents: `

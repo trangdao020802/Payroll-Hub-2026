@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useMemo, useState, useEffect, useRef, useSyncExternalStore } from "react";
+import { useMemo, useState, useEffect, useRef, useSyncExternalStore, useCallback } from "react";
 import { generateUUID, parseAnyDate } from "../lib/utils/data-utils";
 import { mapL07 } from "../lib/utils/center-utils";
 import { TASK_COLUMNS } from "../constants/timesheet-logic";
@@ -34,6 +34,12 @@ export function useTimesheetCalculations(
   });
 
   const workerRef = useRef<Worker | null>(null);
+  const sourceRef = useRef<{ rosterData: any[]; salaryScaleData: any[]; staffData: any[]; cacheData: any[]; ready: boolean } | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
+  const retry = useCallback(() => setRetryKey(key => key + 1), []);
+  useEffect(() => () => {
+    workerRef.current?.terminate(); workerRef.current = null; sourceRef.current = null;
+  }, []);
 
   const fromDateVal = fromDateStr;
   let tempFDate: Date | null = null;
@@ -89,8 +95,10 @@ export function useTimesheetCalculations(
 
   useEffect(() => {
     let inputSendTimer: ReturnType<typeof setTimeout> | undefined;
+    let calculationTimer: ReturnType<typeof setTimeout> | undefined;
 
     if (!enabled || importing || rosterData.length === 0) {
+      workerRef.current?.terminate(); workerRef.current = null; sourceRef.current = null;
       // Release detailed rows while a source workbook is fetched/parsed, and
       // when this consumer is hidden. No global cache pins the old dataset.
       let cancelled = false;
@@ -129,9 +137,17 @@ export function useTimesheetCalculations(
       customTypeRates,
     };
 
+    const sameSource = sourceRef.current?.ready && sourceRef.current.rosterData === rosterData
+      && sourceRef.current.salaryScaleData === salaryScaleData && sourceRef.current.staffData === staffData
+      && sourceRef.current.cacheData === cacheData;
+    if (!sameSource) {
+      workerRef.current?.terminate(); workerRef.current = null; sourceRef.current = null;
+    }
+
     const startWorker = () => {
       try {
-        const worker = new TimesheetWorker();
+        const reused = !!workerRef.current && !!sourceRef.current?.ready;
+        const worker = workerRef.current || new TimesheetWorker();
         workerRef.current = worker;
         const requestId = generateUUID();
         const chunkedResult: Record<string, any[]> = {
@@ -150,9 +166,7 @@ export function useTimesheetCalculations(
             error: resultData.error,
           };
           worker.onmessage = null;
-          worker.onerror = null;
-          worker.terminate();
-          if (workerRef.current === worker) workerRef.current = null;
+          clearTimeout(calculationTimer);
           if (!cancelled) setResult(finalResult);
         };
 
@@ -160,6 +174,7 @@ export function useTimesheetCalculations(
           if (cancelled || workerRef.current !== worker) return;
           const resultData = e.data || {};
           if (resultData.requestId && resultData.requestId !== requestId) return;
+          armCalculationDeadline();
 
           if (resultData.type === "timesheet-result-start") {
             chunkedError = resultData.error;
@@ -172,7 +187,9 @@ export function useTimesheetCalculations(
               target.push(...resultData.rows);
             }
             if (typeof resultData.chunkId === "number") {
-              worker.postMessage({ type: "timesheet-result-ack", requestId, chunkId: resultData.chunkId });
+              setTimeout(() => {
+                if (!cancelled && workerRef.current === worker) worker.postMessage({ type: "timesheet-result-ack", requestId, chunkId: resultData.chunkId });
+              }, 0);
             }
             return;
           }
@@ -189,12 +206,16 @@ export function useTimesheetCalculations(
           commitWorkerResult(resultData);
         };
         worker.onerror = (err: ErrorEvent | any) => {
+          if (cancelled || workerRef.current !== worker) return;
           const errorDetails = err?.message || (err?.error?.message ? err.error.message : "Web Worker runtime error");
           console.warn("Timesheet worker warning:", errorDetails);
           worker.onmessage = null;
           worker.onerror = null;
+          worker.onmessageerror = null;
           worker.terminate();
           if (workerRef.current === worker) workerRef.current = null;
+          sourceRef.current = null;
+          clearTimeout(calculationTimer);
           setResult((prev: any) => ({
             ...prev,
             isCalculating: false,
@@ -203,6 +224,7 @@ export function useTimesheetCalculations(
               "Không thể tính Timesheet trong Worker. Vui lòng tải lại trang và thử lại.",
           }));
         };
+        worker.onmessageerror = () => worker.onerror?.call(worker, { message: 'Không thể nhận kết quả Timesheet. Bấm Thử lại để tiếp tục.' } as ErrorEvent);
         const inputFields = [
           "rosterData",
           "salaryScaleData",
@@ -217,9 +239,23 @@ export function useTimesheetCalculations(
           staffData: undefined,
           cacheData: undefined,
         };
-        // Reduce the number of structured-clone turns for large source files.
-        // 10k rows keeps each message bounded but avoids hundreds of timer hops.
-        const inputChunkSize = 10_000;
+        const armCalculationDeadline = () => {
+          clearTimeout(calculationTimer);
+          calculationTimer = setTimeout(() => {
+            if (cancelled || workerRef.current !== worker) return;
+            worker.terminate(); workerRef.current = null; sourceRef.current = null;
+            setResult({ ...emptyResult(false), error: 'Lọc Timesheet quá lâu. Bấm Thử lại để tiếp tục.' });
+          }, 120000);
+        };
+        armCalculationDeadline();
+        if (reused) {
+          worker.postMessage({ type: 'timesheet-recalculate', requestId, params: workerParams });
+          return;
+        }
+        sourceRef.current = { rosterData, salaryScaleData, staffData, cacheData, ready: false };
+        // Source rows are sent once per dataset, in bounded clone turns.
+        // Period/rate changes reuse the worker's source and only send parameters.
+        const inputChunkSize = 2_000;
         let fieldIndex = 0;
         let rowOffset = 0;
 
@@ -233,6 +269,7 @@ export function useTimesheetCalculations(
           if (workerRef.current !== worker) return;
           if (fieldIndex >= inputFields.length) {
             worker.postMessage({ type: "timesheet-input-complete", requestId });
+            if (sourceRef.current) sourceRef.current.ready = true;
             return;
           }
 
@@ -256,6 +293,8 @@ export function useTimesheetCalculations(
         };
         inputSendTimer = setTimeout(sendNextInputChunk, 0);
       } catch (workerError) {
+        workerRef.current?.terminate(); workerRef.current = null; sourceRef.current = null;
+        clearTimeout(calculationTimer);
         console.error("Failed to instantiate TimesheetWorker:", workerError);
         setResult((prev: any) => ({
           ...prev,
@@ -275,16 +314,18 @@ export function useTimesheetCalculations(
       cancelled = true;
       clearTimeout(startTimer);
       if (inputSendTimer) clearTimeout(inputSendTimer);
+      clearTimeout(calculationTimer);
       if (workerRef.current) {
         workerRef.current.onmessage = null;
         workerRef.current.onerror = null;
-        workerRef.current.terminate();
-        workerRef.current = null;
+        workerRef.current.onmessageerror = null;
+        workerRef.current.postMessage({ type: 'timesheet-cancel-result' });
       }
     };
   }, [
     enabled,
     importing,
+    retryKey,
     includeProcessedRosterData,
     rosterData,
     salaryScaleData,
@@ -303,5 +344,5 @@ export function useTimesheetCalculations(
     preferredYear,
   ]);
 
-  return result;
+  return { ...result, retry };
 }

@@ -23,7 +23,7 @@ function pack(value: unknown): unknown | Promise<unknown> {
     for (const [key, entry] of Object.entries(value)) {
       const packed = pack(entry);
       // Reserve the key before asynchronous files finish, keeping hashes stable.
-      result[key] = undefined;
+      Object.defineProperty(result, key, { value: undefined, enumerable: true, writable: true, configurable: true });
       if (packed instanceof Promise) pending.push(packed.then(item => { result[key] = item; }));
       else result[key] = packed;
     }

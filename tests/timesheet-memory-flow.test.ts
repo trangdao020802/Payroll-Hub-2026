@@ -279,4 +279,35 @@ test("the Timesheet worker waits for each chunk acknowledgement and returns ever
   assert.equal(collected.processedRosterData.length, count);
   assert.equal(new Set(collected.processedRosterData.map(row => row._sourceKey)).size, count);
   assert.equal(collected.centerSummary[0].chargeMktLocal, count * 2 * 20000);
+
+  const recalculate = (requestId: string, fromDateStr: string, toDateStr: string) => workerScope.onmessage({ data: {
+    type: 'timesheet-recalculate', requestId, params: {
+      appData: { Timesheet_InputList: [{ id: 'mkt', l07: 'MKT LOCAL NORTH' }] },
+      preferredYear: 2026, fromDateStr, toDateStr, checkTAsMap: {}, classSizeMap: {}, TASK_COLUMNS: [],
+    },
+  } });
+  // A period change sends only parameters. The worker must retain every
+  // source row even after releasing the previous calculated output chunks.
+  recalculate('october', '2026-09-21', '2026-10-20');
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(messages.map(message => message.type), ['timesheet-result-start', 'timesheet-result-complete']);
+  messages.length = 0;
+  recalculate('obsolete-1', '2026-10-21', '2026-11-20');
+  recalculate('obsolete-2', '2026-11-21', '2026-12-20');
+  recalculate('september', '2026-08-21', '2026-09-20');
+  await new Promise(resolve => setTimeout(resolve, 60));
+  let received = 0;
+  let total = 0;
+  while (messages.length) {
+    const message = messages.shift()!;
+    assert.equal(message.requestId, 'september', 'queued obsolete ranges must not calculate or replace the latest range');
+    if (message.type === 'timesheet-result-chunk') {
+      assert.ok(message.rows!.length <= 500);
+      if (message.field === 'processedRosterData') received += message.rows!.length;
+      if (message.field === 'centerSummary') total += Number(message.rows![0].chargeMktLocal);
+      workerScope.onmessage({ data: { type: 'timesheet-result-ack', requestId: 'september', chunkId: message.chunkId } });
+    }
+  }
+  assert.equal(received, count);
+  assert.equal(total, count * 2 * 20000);
 });

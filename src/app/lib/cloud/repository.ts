@@ -8,6 +8,8 @@ import {
 } from "./protocol";
 import { digest } from "./codec";
 import { withDeadline } from "./deadline";
+import { createCloudValueReceiver } from './value-chunks';
+import localforage from 'localforage';
 export class CloudRepository {
   private worker: Worker | null = null;
   private session = new AbortController();
@@ -18,6 +20,8 @@ export class CloudRepository {
       resolve: (result: { result: unknown; hash?: string }) => void;
       reject: (error: Error) => void;
       timer: ReturnType<typeof setTimeout>;
+      receiver?: ReturnType<typeof createCloudValueReceiver>;
+      sequence?: number;
     }
   >();
   constructor(readonly owner: string) {}
@@ -37,11 +41,41 @@ export class CloudRepository {
     worker.onerror = () => this.resetWorker("Không thể đọc/nén dữ liệu. Bấm Đồng bộ ngay để thử lại.");
     worker.onmessageerror = () => this.resetWorker("Không thể nhận dữ liệu đã đọc. Bấm Đồng bộ ngay để thử lại.");
     worker.onmessage = ({ data }) => {
+      if (this.worker !== worker) return;
       const task = this.pending.get(data.id);
+      if (!task) return;
+      if (data.type === 'codec-chunk') {
+        if (data.sequence !== (task.sequence || 0) + 1) {
+          this.resetWorker('Dữ liệu cloud truyền không đầy đủ. Bấm Đồng bộ ngay để thử lại.');
+          return;
+        }
+        try {
+          task.receiver ||= createCloudValueReceiver();
+          task.receiver.accept(data.part);
+          task.sequence = data.sequence;
+        } catch (error) {
+          this.resetWorker(error instanceof Error ? error.message : 'Không thể mở dữ liệu cloud.');
+          return;
+        }
+        clearTimeout(task.timer);
+        task.timer = setTimeout(() => this.resetWorker('Mở dữ liệu cloud quá lâu. Bấm Đồng bộ ngay để thử lại.'), 120000);
+        setTimeout(() => {
+          if (this.worker === worker && this.pending.has(data.id)) worker.postMessage({ type: 'codec-ack', id: data.id, sequence: data.sequence });
+        }, 0);
+        return;
+      }
       this.pending.delete(data.id);
-      if (task) clearTimeout(task.timer);
-      if (data.error) task?.reject(new Error(data.error));
-      else task?.resolve(data);
+      clearTimeout(task.timer);
+      try {
+        if (data.error) task.reject(Object.assign(new Error(data.error), { code: data.code }));
+        else {
+          if (data.type === 'codec-complete' && !task.receiver) throw new Error('Dữ liệu cloud chưa đầy đủ.');
+          task.resolve(data.type === 'codec-complete' ? { result: task.receiver!.finish() } : data);
+        }
+      } catch (error) { task.reject(error instanceof Error ? error : new Error(String(error))); }
+      // A decoded full workspace must not keep its worker heap alive alongside
+      // the reconstructed tables and IndexedDB's durable copy.
+      if (!this.pending.size) { worker.terminate(); this.worker = null; }
     };
     return worker;
   }
@@ -49,7 +83,7 @@ export class CloudRepository {
     this.session.abort();
     this.resetWorker("Phiên đồng bộ đã đóng.");
   }
-  private codec(operation: "encode" | "decode", value: unknown) {
+  private codec(operation: "encode" | "decode" | "cache-read", value: unknown) {
     return new Promise<{ result: unknown; hash?: string }>(
       (resolve, reject) => {
         if (this.session.signal.aborted) return reject(new Error("Phiên đồng bộ đã đóng."));
@@ -57,7 +91,7 @@ export class CloudRepository {
         const timer = setTimeout(() => this.resetWorker("Đọc/nén dữ liệu quá lâu. Dữ liệu trên máy vẫn được giữ; bấm Đồng bộ ngay để thử lại."), 120000);
         this.pending.set(id, { resolve, reject, timer });
         try {
-          this.getWorker().postMessage({ id, operation, value });
+          this.getWorker().postMessage({ id, operation, value, chunked: operation !== 'encode' });
         } catch (error) {
           this.pending.delete(id);
           clearTimeout(timer);
@@ -65,6 +99,16 @@ export class CloudRepository {
         }
       },
     );
+  }
+  /** IndexedDB materializes large snapshots in a worker, then yields chunks to the UI. */
+  async readCachedField<T>(key: string): Promise<T | null> {
+    try { return (await this.codec('cache-read', key)).result as T | null; }
+    catch (error) {
+      // localforage may use localStorage on browsers without IndexedDB. That
+      // small legacy fallback is available only on the window thread.
+      if ((error as { code?: string }).code === 'CACHE_WORKER_UNAVAILABLE') return localforage.getItem<T>(key);
+      throw error;
+    }
   }
   private request<T>(operation: (signal: AbortSignal) => PromiseLike<T>) {
     return withDeadline(operation, "Kết nối cloud quá lâu. Dữ liệu trên máy vẫn được giữ; bấm Đồng bộ ngay để thử lại.", 30000, this.session.signal);
@@ -115,20 +159,25 @@ export class CloudRepository {
     }
     return { hash: hash!, bytes: blob.size, parts };
   }
-  async download(asset: Asset): Promise<unknown> {
+  async download(asset: Asset, progress?: (stage: 'download' | 'decode', received: number) => void): Promise<unknown> {
     const blobs: Blob[] = [];
-    for (const path of asset.parts) {
-      if (!path.startsWith(`${this.owner}/${asset.hash}/`))
-        throw new Error("Đường dẫn cloud không hợp lệ");
-      const { data, error } = await this.request(() => supabase.storage
-        .from(BUCKET)
-        .download(path));
-      if (error) throw error;
-      blobs.push(data);
+    let received = 0;
+    for (let offset = 0; offset < asset.parts.length; offset += 4) {
+      const batch = await Promise.all(asset.parts.slice(offset, offset + 4).map(async path => {
+        if (!path.startsWith(`${this.owner}/${asset.hash}/`)) throw new Error("Đường dẫn cloud không hợp lệ");
+        const { data, error } = await this.request(() => supabase.storage.from(BUCKET).download(path));
+        if (error) throw error;
+        received += data.size;
+        progress?.('download', received);
+        return data;
+      }));
+      // Promise.all retains source order even when parts finish out of order.
+      blobs.push(...batch);
     }
     const blob = new Blob(blobs);
     if (blob.size !== asset.bytes || (await digest(blob)) !== asset.hash)
       throw new Error("Dữ liệu cloud chưa đầy đủ. Bản trên máy vẫn được giữ.");
+    progress?.('decode', received);
     return (await this.codec("decode", blob)).result;
   }
   async cleanup() {

@@ -26,8 +26,21 @@ export function prepareHydrationTables(data: AppData): AppData {
 
 // Serialize readers/writers from other tabs too. The hash stamp is invalidated
 // before writes so an interrupted save remains a cache miss, never stale proof.
-export async function withAppStorageLock<T>(task: () => Promise<T>): Promise<T> {
+export async function withAppStorageLock<T>(task: () => Promise<T>, waitTimeoutMs?: number): Promise<T> {
   if (typeof navigator !== "undefined" && navigator.locks) {
+    if (waitTimeoutMs !== undefined) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), waitTimeoutMs);
+      try {
+        return await navigator.locks.request('PayrollApp:app-data', { signal: controller.signal }, () => {
+          clearTimeout(timer);
+          return task();
+        });
+      } catch (error) {
+        if (controller.signal.aborted) throw new Error('Kho trên máy đang được tab khác sử dụng. Đóng tab payroll còn lại rồi bấm Thử mở lại.');
+        throw error;
+      } finally { clearTimeout(timer); }
+    }
     return await navigator.locks.request("PayrollApp:app-data", task);
   }
   return task();

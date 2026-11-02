@@ -8,6 +8,7 @@ import {
 } from "./protocol";
 import { CloudRepository } from "./repository";
 import { cachedFieldHash, rememberCloudField, sameManifest, CLOUD_CACHE_EVENT } from "./field-cache";
+import { withDeadline } from './deadline';
 export type SyncStatus =
   | "starting"
   | "saving"
@@ -21,6 +22,7 @@ export interface SyncState {
   conflicts?: string[];
   updatedAt?: string;
   revision?: number;
+  opened?: boolean;
 }
 export const OWNER_KEY = "payroll_cloud_cache_owner";
 const EMPTY: Manifest = { version: 1, fields: {} };
@@ -79,10 +81,25 @@ export class SyncEngine {
     let completed = 0;
     for (let offset = 0; offset < ordered.length;) {
       // Fetch small tables together, but decode large rosters one at a time.
-      const count = remote.manifest.fields[ordered[offset]].bytes > 4 * 1024 * 1024 ? 1 : 3;
-      const batch = ordered.slice(offset, offset + count).filter(key => count === 1 || remote.manifest.fields[key].bytes <= 4 * 1024 * 1024);
+      const batch: string[] = [];
+      let batchBytes = 0;
+      for (const key of ordered.slice(offset, offset + 8)) {
+        const size = remote.manifest.fields[key].bytes;
+        if (batch.length && batchBytes + size > 1024 * 1024) break;
+        batch.push(key); batchBytes += size;
+        if (batchBytes >= 1024 * 1024) break;
+      }
       await Promise.all(batch.map(async key => {
-        patch[key] = await this.repository.download(remote.manifest.fields[key]);
+        const names: Record<string, string> = { TableOriginals: 'bản gốc các bảng', Timesheet_Roster: 'Timesheet', Ae_Global_Inputs: 'nguồn dữ liệu', TransactionMonthCache: 'Batch Payment' };
+        const label = names[key] || 'bảng dữ liệu';
+        const size = (remote.manifest.fields[key].bytes / 1048576).toFixed(1);
+        const status = this.ready ? 'saving' : 'starting';
+        this.report({ status, message: `Đang tải ${completed}/${fields.length} phần: ${label} (${size} MB)…` });
+        patch[key] = await this.repository.download(remote.manifest.fields[key], (stage, received) => {
+          if (!this.stopped) this.report({ status, message: stage === 'decode'
+            ? `Đang mở ${label} (${size} MB sau nén)…`
+            : `Đang tải ${label}: ${(received / 1048576).toFixed(1)} / ${size} MB…` });
+        });
       }));
       if (this.stopped) return;
       completed += batch.length;
@@ -159,13 +176,18 @@ export class SyncEngine {
       this.refs = { ...this.getData() };
       this.base = checkpoint?.base || null;
       this.dirty = new Set(checkpoint?.dirty || []);
+      this.report({ status: 'starting', message: 'Đang kiểm tra quyền truy cập kho payroll…' });
       await this.repository.checkMembership();
+      this.report({ status: 'starting', message: 'Đang kiểm tra phiên bản dữ liệu cloud mới nhất…' });
       let remote = await this.repository.read();
       if (this.stopped) return;
       if (remote) {
         // Every login takes the saved cloud version. Keep unsynced local work
         // in a pinned backup; never replay an old device's dirty checkpoint.
-        if (this.dirty.size || !checkpoint?.base) await this.backup();
+        if (this.dirty.size || !checkpoint?.base) {
+          this.report({ status: 'starting', message: 'Đang giữ bản sao dữ liệu chưa đồng bộ trên máy…' });
+          await withDeadline(() => this.backup(), 'Lưu bản sao trên máy quá lâu. Dữ liệu vẫn được giữ; bấm Đồng bộ ngay để thử lại.', 60000);
+        }
         if (this.stopped) return;
         for (let attempt = 0; attempt < 5; attempt++) {
           const current = this.getData() as unknown as Record<string, unknown>;
@@ -182,6 +204,7 @@ export class SyncEngine {
           this.changed();
           if (!this.dirty.size && latest.revision === remote.revision && sameManifest(latest.manifest, remote.manifest)) {
             this.base = latest;
+            this.report({ status: 'starting', message: 'Đang kiểm tra các tháng Batch Payment đã lưu…' });
             await this.refresh();
             if (this.stopped) return;
             const checked = await this.repository.read();
@@ -194,8 +217,13 @@ export class SyncEngine {
             this.storage.setItem(OWNER_KEY, this.repository.owner);
             this.ready = true;
             this.checkpoint();
-            if (this.dirty.size) await this.sync();
-            else this.report({ status: "synced", updatedAt: latest.updated_at, revision: latest.revision });
+            // Cloud plus monthly history is verified and installed. The user
+            // can work while an automatic history/cache upgrade is uploaded;
+            // Save still awaits that upload and never reports success early.
+            if (this.dirty.size) {
+              this.report({ status: 'saving', opened: true, updatedAt: latest.updated_at, revision: latest.revision });
+              await this.sync();
+            } else this.report({ status: "synced", opened: true, updatedAt: latest.updated_at, revision: latest.revision });
             return;
           }
           remote = latest;

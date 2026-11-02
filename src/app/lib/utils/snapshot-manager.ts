@@ -147,6 +147,7 @@ export async function saveSnapshot(
     trigger?: SnapshotTrigger;
     note?: string;
     isPinned?: boolean;
+    required?: boolean;
   } = {},
 ): Promise<SnapshotMetadata> {
   const now = new Date();
@@ -222,6 +223,7 @@ export async function saveSnapshot(
     dispatchSnapshotEvent("payroll-snapshots-updated", { detail: { newId: id } });
   } catch (err) {
     console.error("Failed to save snapshot", err);
+    if (options.required) throw err;
   }
 
   return meta;

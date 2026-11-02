@@ -25,6 +25,31 @@ const manifest = (fields: Record<string, string>): Manifest => ({
     Object.entries(fields).map(([key, hash]) => [key, asset(hash)]),
   ),
 });
+test('verified login opens before a slow automatic history upload, while Save still waits for the commit', async () => {
+  const h = harness();
+  const seed = h.client({ BankExport: { data: ['saved cloud'] } });
+  await seed.engine.start(); seed.engine.stop();
+  h.resetDevice();
+  const upload = h.pauseUpload();
+  const restored = h.client({ BankExport: { data: ['stale cache'] } }, false,
+    async data => ({ ...data, TransactionHistoryRestoreDisabled: true }));
+  try {
+    const opening = restored.engine.start();
+    await upload.started;
+    assert.deepEqual(restored.data.BankExport, { data: ['saved cloud'] });
+    assert.ok(restored.states.some(state => (state as {opened?: boolean}).opened));
+    assert.equal(restored.states.some(state => (state as {status: string}).status === 'synced'), false);
+    let saved = false;
+    const saving = restored.engine.flush().then(() => { saved = true; });
+    await Promise.resolve();
+    assert.equal(saved, false);
+    upload.release();
+    await Promise.all([opening, saving]);
+    assert.equal(saved, true);
+    assert.equal((restored.states.at(-1) as {status: string}).status, 'synced');
+  } finally { upload.release(); restored.engine.stop(); }
+});
+
 test("gzip preserves Vietnamese, undefined, uploaded files and date values", async () => {
   const source = {
     month: "Tháng phát sinh",
