@@ -23,7 +23,7 @@ test("cloud RLS, complete uploads, immutable assets and compare-and-swap protect
     await db.exec(
       readFileSync(
         new URL(
-          "../supabase/migrations/20261004040037_payroll_cloud_workspace_sync.sql",
+          "../supabase/migrations/20261004041335_payroll_cloud_workspace_sync.sql",
           import.meta.url,
         ),
         "utf8",
@@ -32,7 +32,7 @@ test("cloud RLS, complete uploads, immutable assets and compare-and-swap protect
     await db.exec(
       readFileSync(
         new URL(
-          "../supabase/migrations/20261004041803_payroll_cloud_safe_cleanup.sql",
+          "../supabase/migrations/20261004042218_payroll_cloud_safe_cleanup.sql",
           import.meta.url,
         ),
         "utf8",

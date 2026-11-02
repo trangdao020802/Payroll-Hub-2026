@@ -193,3 +193,33 @@ no lost/duplicate employee IDs. The main-thread heartbeat kept running; its
 largest measured gap was 34 ms in this environment. A local interactive browser
 was unavailable; the owner's signed-in Google Sheets and physical computers are
 not used by these regression tests. No production payroll data is rewritten.
+
+### 2026-11-02: align GitHub migrations with Supabase history
+
+The Supabase GitHub check failed with `Remote migration versions not found in
+local migrations directory` even though the production project was healthy.
+The three cloud migrations had identical SQL but filenames used their local
+creation times instead of the versions recorded when Supabase applied them:
+
+| Migration | Previous repository version | Applied Supabase version |
+| --- | --- | --- |
+| payroll_cloud_workspace_sync | 20261004040037 | 20261004041335 |
+| payroll_cloud_safe_cleanup | 20261004041803 | 20261004042218 |
+| payroll_cloud_explicit_anon_guard | 20261004043228 | 20261004043314 |
+
+The repository now uses the applied versions. The existing shared-project
+`20261026035408_create_promotion_workspaces_secure` migration is also recovered
+verbatim from `supabase_migrations.schema_migrations`. Both applications use the
+same Supabase project, so its complete migration history belongs in the linked
+repository. All nine local versions match production; none are pending. The
+SQL of all four recovered files matches the recorded statements after trimming
+trailing whitespace. Database history is not repaired, reset or rewritten.
+
+The migration replay regression runs every tracked file in order on a disposable
+Postgres-compatible database with Supabase-managed schemas and a legacy Roster
+fixture. It checks preservation of that row, complete migration tracking, no
+pending second deployment, payroll RPC access and cross-owner/anonymous denial
+for the shared Promotion workspace. The existing payroll cloud, transaction
+history and atomic identity-sync database tests also pass. Production inspection
+uses only project health, migration metadata, logs and advisors; payroll rows and
+schema are not changed by this repository repair.
