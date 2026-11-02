@@ -178,6 +178,19 @@ test("refresh uses Settings sync for only missing links, handles file-only sourc
   assert.deepEqual(requests, ["missing-link"], "do not repeatedly fetch a successful source with no matching L07");
   await harness.render().syncRow("missing");
   assert.equal(requests.length, 2, "Settings Actions remains available for an explicit full resync");
+
+  // Pasting a replacement URL changes the source identity before its result
+  // arrives. That explicitly requested result must still be allowed to commit.
+  unmatched = false;
+  requests.length = 0;
+  harness.setData(initial());
+  assert.equal(await harness.render().syncRow("missing", "replacement-link"), 1);
+  assert.deepEqual(requests, ["replacement-link"]);
+  const replaced = harness.getData().Timesheet_InputList.find(row => row.id === "missing")!;
+  assert.equal(replaced.url, "replacement-link");
+  assert.equal(replaced.status, "success");
+  assert.equal(harness.getData().Timesheet_Roster.filter(row => row._rowId === "missing").length, 1);
+  assert.equal(harness.getData().Timesheet_Roster[0].ma_nv, "UNCHANGED");
 });
 
 

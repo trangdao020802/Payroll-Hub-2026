@@ -21,6 +21,7 @@ interface ExcelWorkerRequest {
   fileName: string;
   fileId?: string;
   mode?: ExcelParseMode;
+  resultBackpressure?: boolean;
 }
 
 function findHeaderRow(rows: any[][]) {
@@ -324,7 +325,28 @@ export function prepareExcelResult(
 }
 
 if (typeof window === "undefined" && typeof self !== "undefined") {
-  self.onmessage = async (event: MessageEvent<ExcelWorkerRequest>) => {
+  const outputs = new Map<string, { result: ExcelParseResult; offset: number; chunkId: number }>();
+  const sendNext = (requestId: string) => {
+    const output = outputs.get(requestId);
+    if (!output) return;
+    if (output.offset >= output.result.rows.length) {
+      outputs.delete(requestId);
+      self.postMessage({ type: "excel-result-complete", requestId, success: true });
+      return;
+    }
+    const end = Math.min(output.offset + 1_000, output.result.rows.length);
+    self.postMessage({ type: "excel-result-chunk", requestId,
+      chunkId: ++output.chunkId, rows: output.result.rows.slice(output.offset, end) });
+    // postMessage owns a clone now; release the worker's transmitted rows.
+    for (let index = output.offset; index < end; index++) delete output.result.rows[index];
+    output.offset = end;
+  };
+  self.onmessage = (event: MessageEvent<ExcelWorkerRequest & { type?: string; chunkId?: number }>) => {
+    if (event.data.type === "excel-result-ack") {
+      const output = outputs.get(event.data.requestId);
+      if (output?.chunkId === event.data.chunkId) sendNext(event.data.requestId);
+      return;
+    }
     const {
       requestId,
       fileBuffer,
@@ -335,7 +357,13 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
     try {
       const rawRows = parseExcelData(fileBuffer, fileName);
       const result = prepareExcelResult(rawRows, fileName, fileId, mode);
-      self.postMessage({ requestId, success: true, result });
+      if (event.data.resultBackpressure) {
+        outputs.set(requestId, { result, offset: 0, chunkId: 0 });
+        self.postMessage({ type: "excel-result-start", requestId, kind: result.kind });
+        sendNext(requestId);
+      } else {
+        self.postMessage({ requestId, success: true, result });
+      }
     } catch (error: any) {
       self.postMessage({
         requestId,

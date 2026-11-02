@@ -4,6 +4,7 @@ import { useAppData } from "../lib/contexts/AppDataContext";
 import { getMissingTimesheetCenters, type TimesheetCoverageDateRange } from "../lib/utils/timesheet-center-coverage";
 import { parseTimesheetSyncDate } from "../lib/utils/timesheet-sync-date";
 import { useTimesheetLinkSync } from "./useTimesheetLinkSync";
+import { withTimesheetImportBatch } from "../lib/utils/timesheet-import-queue";
 
 export function useMissingTimesheetCenters(
   rows: readonly Record<string, unknown>[],
@@ -50,11 +51,13 @@ export function useMissingTimesheetCenters(
     try {
       // Capture just this table's missing sources and preserve each successful
       // update if another source fails. Sequential fetches avoid Google throttling.
-      for (const input of coverage.inputs) {
-        const count = await syncRow(input.id, undefined, undefined, true);
-        if (count !== null) successCount++;
-        if (count === 0) emptyCount++;
-      }
+      await withTimesheetImportBatch(async () => {
+        for (const input of coverage.inputs) {
+          const count = await syncRow(input.id, undefined, undefined, true);
+          if (count !== null) successCount++;
+          if (count === 0) emptyCount++;
+        }
+      });
       const message = `Đã làm mới ${successCount}/${coverage.inputs.length} link Center còn thiếu.`;
       if (successCount === coverage.inputs.length) toast.success(message);
       else toast.warning(message);

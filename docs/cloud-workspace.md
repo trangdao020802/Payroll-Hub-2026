@@ -160,3 +160,36 @@ Verification: all 384 tests pass under `TZ=Asia/Ho_Chi_Minh`, along with
 TypeScript and the production build. Focused ESLint has no errors and the same
 existing BulkPayment memo-dependency warning. Private account acceptance on the
 owner's computers is not exercised by these synthetic-data tests.
+
+### 2026-11-02: responsive Google Sheet link updates
+
+Excel parsing previously returned the complete expanded workbook in one message.
+Link updates then normalized and replaced the complete Roster inside the React
+state updater. Folder imports also released calculation suspension between each
+file, cloned source baselines and could repeatedly calculate intermediate states.
+
+The parser now sends at most 1,000 rows at a time and waits for a UI acknowledgement
+after an event-loop turn, releasing transmitted worker rows. Replacement warms
+immutable row identities in yielding batches and prepares the next array before
+committing. A concurrent edit still uses the latest table; a deleted/reassigned
+source cannot be resurrected by a late result. Replacement URLs are recognized
+as the requested source. Folder and missing-center runs share the link importer
+and hold calculation suspension across the complete batch without nesting the
+serial queue. Settings requests summaries without returning unused detailed rows;
+changed amounts are saved even when summary row counts stay the same.
+
+Download, folder-list and parser deadlines release a stalled import so retry and
+subsequent links remain usable. Failed downloads retain the previous source rows.
+The cloud format, login authority, Save contract, saved Deductions, payroll
+calculation rules and database schema remain unchanged.
+
+Verification uses synthetic data: event-loop heartbeat during a large cold Roster
+replacement, bounded parser messages and acknowledgements, worker timeout/retry,
+sequential folder suspension, URL replacement, stale/deleted sources, concurrent
+rows, failed downloads and matching summary totals. The full 396-test suite,
+TypeScript, production build and focused ESLint pass. A separate 50,000-row test
+through a real Node worker thread received all rows in 50 bounded batches with
+no lost/duplicate employee IDs. The main-thread heartbeat kept running; its
+largest measured gap was 34 ms in this environment. A local interactive browser
+was unavailable; the owner's signed-in Google Sheets and physical computers are
+not used by these regression tests. No production payroll data is rewritten.

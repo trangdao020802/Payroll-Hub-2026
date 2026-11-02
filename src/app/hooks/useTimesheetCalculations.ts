@@ -20,6 +20,7 @@ export function useTimesheetCalculations(
   fromDateStr: string,
   toDateStr: string,
   enabled = true,
+  includeProcessedRosterData = true,
 ) {
   const { appData } = useAppData();
   const uiSettings = useUiSettings();
@@ -120,6 +121,7 @@ export function useTimesheetCalculations(
         customTypeRates,
       },
       preferredYear,
+      includeProcessedRosterData,
       checkTAsMap,
       classSizeMap,
       TASK_COLUMNS,
@@ -283,6 +285,7 @@ export function useTimesheetCalculations(
   }, [
     enabled,
     importing,
+    includeProcessedRosterData,
     rosterData,
     salaryScaleData,
     staffData,

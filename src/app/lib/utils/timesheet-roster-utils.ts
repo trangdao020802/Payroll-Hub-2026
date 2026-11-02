@@ -270,3 +270,24 @@ export function replaceTimesheetRosterRows<T extends RosterRow>(
 
   return [...retainedRows, ...uniqueIncoming];
 }
+
+export async function prepareTimesheetRosterReplacement<T extends RosterRow>(
+  existingRows: T[],
+  incomingRows: T[],
+  options: Parameters<typeof replaceTimesheetRosterRows>[2],
+): Promise<{ original: T[]; rows: T[] }> {
+  // Normalizing dates/headers/centers for an entire roster inside a React
+  // updater blocks input and rendering. Warm the immutable row caches in small
+  // turns before committing; the final replacement only visits cached keys.
+  let newlyPrepared = 0;
+  for (const rows of [incomingRows, existingRows]) {
+    for (const row of rows) {
+      if (businessKeyCache.has(row)) continue;
+      getTimesheetRosterBusinessKey(row);
+      if (++newlyPrepared % 250 === 0) {
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+      }
+    }
+  }
+  return { original: existingRows, rows: replaceTimesheetRosterRows(existingRows, incomingRows, options) };
+}

@@ -10,6 +10,19 @@ export const subscribeTimesheetImports = (listener: () => void) => {
 };
 const emit = () => listeners.forEach((listener) => listener());
 
+// A folder holds calculation suspension across sequential imports without
+// entering the serial queue itself (which would deadlock its child imports).
+export async function withTimesheetImportBatch<T>(task: () => Promise<T>): Promise<T> {
+  pending++;
+  if (pending === 1) emit();
+  try {
+    return await task();
+  } finally {
+    pending--;
+    if (pending === 0) emit();
+  }
+}
+
 export function runTimesheetImport<T>(task: () => Promise<T>): Promise<T> {
   pending++;
   if (pending === 1) emit();

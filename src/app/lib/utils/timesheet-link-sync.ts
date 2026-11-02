@@ -4,9 +4,21 @@ import { normalizeTimesheetL07, type TimesheetLinkInput } from "./timesheet-cent
 import { shouldSkipTimesheetSource } from "./timesheet-input-resolver";
 import { replaceTimesheetRosterRows } from "./timesheet-roster-utils";
 import { formatTimesheetSyncDate } from "./timesheet-sync-date";
+import { withDeadline } from "../cloud/deadline";
 
 export const DEFAULT_TIMESHEET_FOLDER_URL = "https://drive.google.com/drive/folders/1gU6Hcrv94Bx_yv1qNTqH0vQNy7ElKzXJ";
 export const MKT_LOCAL_NORTH_URL = "https://docs.google.com/spreadsheets/d/1z7DJYJAyWqBw8IXNYbEIHhGXBMumsRA4rUHT1prBsFo/edit?gid=1119129159#gid=1119129159";
+
+type DriveFile = { id: string; name: string; modifiedTime?: string; createdTime?: string; webViewLink?: string; url?: string };
+export function fetchTimesheetFolderFiles(folderId: string, timeoutMs = 60_000): Promise<DriveFile[]> {
+  return withDeadline(async signal => {
+    const response = await fetch(`/api/drive-folder-files?folderId=${encodeURIComponent(folderId)}`, { signal });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Không thể lấy danh sách file từ thư mục. Vui lòng kiểm tra quyền truy cập.");
+    if (!data.success || !Array.isArray(data.files)) throw new Error("Không tìm thấy file nào trong thư mục.");
+    return data.files;
+  }, "Tải danh sách Google Drive quá lâu. Vui lòng thử lại.", timeoutMs);
+}
 
 export async function resolveTimesheetLink(input: TimesheetLinkInput) {
   if (input.url?.trim()) return { url: input.url.trim(), date: input.date };
@@ -15,12 +27,8 @@ export async function resolveTimesheetLink(input: TimesheetLinkInput) {
   if (!l07) throw new Error("Không có mã L07 để tìm kiếm.");
 
   const folderId = DEFAULT_TIMESHEET_FOLDER_URL.split("/").pop()!;
-  const response = await fetch(`/api/drive-folder-files?folderId=${encodeURIComponent(folderId)}`);
-  if (!response.ok) throw new Error("Không thể lấy danh sách file từ thư mục. Vui lòng kiểm tra lại quyền truy cập.");
-  const data = await response.json();
-  if (!data.success || !Array.isArray(data.files)) throw new Error("Không tìm thấy file nào trong thư mục.");
-  type DriveFile = { id: string; name: string; modifiedTime?: string; createdTime?: string; webViewLink?: string; url?: string };
-  const file = (data.files as DriveFile[])
+  const files = await fetchTimesheetFolderFiles(folderId);
+  const file = files
     .filter((candidate) => !candidate.name.toLowerCase().includes("copy")
       && !shouldSkipTimesheetSource(candidate.name, candidate.webViewLink, candidate.url)
       && normalizeTimesheetL07(getL07FromFileName(candidate.name)) === l07)
@@ -37,6 +45,7 @@ export function applyTimesheetLinkResult(
   input: TimesheetLinkInput,
   rows: Record<string, unknown>[],
   source: { url: string; fileName: string; date: string; lastSyncedAt?: string },
+  prepared?: { original: Record<string, unknown>[]; rows: Record<string, unknown>[] },
 ): AppData {
   const currentInput = previous.Timesheet_InputList.find((row) => row.id === input.id);
   // A deleted or reassigned source must not reappear when its request finishes.
@@ -46,7 +55,8 @@ export function applyTimesheetLinkResult(
   const aeCode = input.aeCode || getCenterInfoByL07(targetL07)?.aeCode || "";
   return {
     ...previous,
-    Timesheet_Roster: replaceTimesheetRosterRows(previous.Timesheet_Roster || [], rows, {
+    Timesheet_Roster: prepared && previous.Timesheet_Roster === prepared.original
+      ? prepared.rows : replaceTimesheetRosterRows(previous.Timesheet_Roster || [], rows, {
       sourceRowIds: new Set([input.id, ...(currentInput.legacyRowIds || [])]),
       targetL07,
       targetAeCode: aeCode,

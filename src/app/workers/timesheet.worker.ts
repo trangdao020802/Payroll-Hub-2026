@@ -838,7 +838,8 @@ export function calculateTimesheet(params: any) {
   });
   const cenResult = Object.values(cenAggregate);
 
-  return { processedRosterData: details, employeeSummary: empResult, centerSummary: cenResult, isCalculating: false };
+  return { processedRosterData: params.includeProcessedRosterData === false ? [] : details,
+    employeeSummary: empResult, centerSummary: cenResult, isCalculating: false };
 
   } catch (error: any) {
     return {

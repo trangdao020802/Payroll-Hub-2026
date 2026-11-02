@@ -1,3 +1,5 @@
+import { withDeadline } from "../cloud/deadline";
+
 export function parseMoneyToNumber(val: unknown): number {
   if (typeof val === "number") return Number.isFinite(val) ? val : 0;
   if (typeof val === "bigint") return Number(val);
@@ -770,6 +772,16 @@ export function generateUUID(): string { return Math.random().toString(); }
 export async function fetchGoogleSheetAsFile(
   url: string,
   name: string,
+  timeoutMs = 90_000,
+): Promise<File> {
+  return withDeadline(signal => downloadGoogleSheet(url, name, signal),
+    "Tải Google Sheet quá lâu. Dữ liệu cũ được giữ nguyên; vui lòng thử cập nhật lại link.", timeoutMs);
+}
+
+async function downloadGoogleSheet(
+  url: string,
+  name: string,
+  signal: AbortSignal,
 ): Promise<File> {
   const sourceUrl = String(url || "").trim();
   if (!sourceUrl) {
@@ -784,6 +796,7 @@ export async function fetchGoogleSheetAsFile(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: sourceUrl }),
+      signal,
     });
   } catch (err: unknown) {
     fetchError = err instanceof Error ? err : new Error(String(err));
@@ -840,6 +853,7 @@ export async function fetchGoogleSheetAsFile(
   }
 
   // Fallback: try direct client-side fetch for publicly accessible Google Sheets
+  if (signal.aborted) throw fetchError || new Error("Đã dừng tải Google Sheet.");
   const dMatch = sourceUrl.match(/\/d\/([a-zA-Z0-9-_]{15,})/);
   const pubMatch = sourceUrl.match(/\/d\/e\/([a-zA-Z0-9-_]{20,})/);
   let directUrl = "";
@@ -854,7 +868,7 @@ export async function fetchGoogleSheetAsFile(
 
   if (directUrl) {
     try {
-      const directRes = await fetch(directUrl);
+      const directRes = await fetch(directUrl, { signal });
       if (directRes.ok) {
         const text = await directRes.text();
         if (text && !looksLikeHtmlPayload(text)) {

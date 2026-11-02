@@ -24,7 +24,7 @@ import {
   syncRosterToSupabase,
   SQL_SETUP_SCRIPT,
 } from "../../lib/supabase-sync-utils";
-import { runTimesheetImport } from "../../lib/utils/timesheet-import-queue";
+import { runTimesheetImport, withTimesheetImportBatch } from "../../lib/utils/timesheet-import-queue";
 import { useTimesheetCalculations } from "../../hooks/useTimesheetCalculations";
 import { getDynamicEmployeeColumns, CENTER_COLUMNS } from "../../constants/timesheet-columns";
 import { TimesheetInputTable } from "./components/TimesheetInputTable";
@@ -73,7 +73,7 @@ import {
 import { parseExcelInWorker } from "../../lib/utils/excel-worker-client";
 import type { ExcelParseResult } from "../../workers/excelParser.worker";
 import { useTimesheetLinkSync } from "../../hooks/useTimesheetLinkSync";
-import { DEFAULT_TIMESHEET_FOLDER_URL as DEFAULT_FOLDER_URL, MKT_LOCAL_NORTH_URL } from "../../lib/utils/timesheet-link-sync";
+import { DEFAULT_TIMESHEET_FOLDER_URL as DEFAULT_FOLDER_URL, MKT_LOCAL_NORTH_URL, fetchTimesheetFolderFiles } from "../../lib/utils/timesheet-link-sync";
 
 interface TimesheetSummaryPageProps {
   onBack?: () => void;
@@ -97,6 +97,7 @@ export default function TimesheetSummaryPage({ onBack }: TimesheetSummaryPagePro
   const [syncSchemaError, setSyncSchemaError] = useState('');
 
   const [isFetchingGgSheet, setIsFetchingGgSheet] = useState(false);
+  const urlInputBusy = useRef(false);
   const [bulkUploadProgress, setBulkUploadProgress] = useState<{
     current: number;
     total: number;
@@ -107,13 +108,14 @@ export default function TimesheetSummaryPage({ onBack }: TimesheetSummaryPagePro
   const [clearRowTargetId, setClearRowTargetId] = useState<string | null>(null);
 
   const handleUrlInput = async (id: string, url: string) => {
-    if (!url.trim()) return;
+    if (!url.trim() || urlInputBusy.current) return;
     if (shouldSkipTimesheetSource(url)) {
       toast.info("Hệ thống tự động bỏ qua link MKT HP.");
       return;
     }
     const isFolder = url.includes("folders/") || url.includes("drive/folders/") || url.includes("?id=");
 
+    urlInputBusy.current = true;
     setIsFetchingGgSheet(true);
     try {
       if (isFolder) {
@@ -130,18 +132,12 @@ export default function TimesheetSummaryPage({ onBack }: TimesheetSummaryPagePro
           } catch { /* ignore */ }
         }
 
-        const response = await fetch(`/api/drive-folder-files?folderId=${encodeURIComponent(folderId)}`);
-        if (!response.ok) {
-          const errData = await response.json().catch(() => ({}));
-          throw new Error(errData.error || "Không thể lấy danh sách file từ thư mục. Vui lòng kiểm tra lại link hoặc quyền chia sẻ.");
-        }
-
-        const data = await response.json();
-        if (!data.success || !data.files || data.files.length === 0) {
+        const files = await fetchTimesheetFolderFiles(folderId);
+        if (files.length === 0) {
           throw new Error("Không tìm thấy file nào trong thư mục này.");
         }
 
-        const driveFiles = (data.files || []).filter((f: Record<string, unknown>) => {
+        const driveFiles = files.filter(f => {
           const name = String(f.name || "").toLowerCase();
           return !name.includes("copy") && !shouldSkipTimesheetSource(
             f.name,
@@ -150,7 +146,7 @@ export default function TimesheetSummaryPage({ onBack }: TimesheetSummaryPagePro
           );
         });
 
-        if (driveFiles.length === 0 && data.files.length > 0) {
+        if (driveFiles.length === 0 && files.length > 0) {
           throw new Error("Tất cả các file trong thư mục đều là file 'copy' nên hệ thống tự động bỏ qua.");
         }
 
@@ -215,7 +211,7 @@ export default function TimesheetSummaryPage({ onBack }: TimesheetSummaryPagePro
 
         if (successCount > 0) {
           // Set matched rows to a "ready" status first, but don't start processing yet
-          const readyInputs = currentInputs.map(r => {
+          updateAppData(prev => ({ ...prev, Timesheet_InputList: prev.Timesheet_InputList.map(r => {
             const match = queuedByRowId.get(r.id);
             if (match) {
               return {
@@ -227,38 +223,29 @@ export default function TimesheetSummaryPage({ onBack }: TimesheetSummaryPagePro
               };
             }
             return r;
+          }) }), false);
+          
+          let completed = 0;
+          await withTimesheetImportBatch(async () => {
+            for (let i = 0; i < toProcess.length; i++) {
+              const item = toProcess[i];
+              try {
+                const count = await handleSyncRow(item.id, item.url, item.uploadDate, true);
+                if (count !== null) completed++;
+              } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                console.error(`Failed to process ${item.file.name}:`, err);
+                handleUpdateRow(item.id, "status", "error");
+                toast.error(`Lỗi xử lý ${item.file.name}: ${msg}`);
+              }
+
+              if (i < toProcess.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 150));
+              }
+            }
           });
           
-          updateAppData(prev => ({ ...prev, Timesheet_InputList: readyInputs }), false);
-          
-          // Sequential processing with delay
-          for (let i = 0; i < toProcess.length; i++) {
-            const item = toProcess[i];
-            
-            // 1. Set individual row to processing for UI feedback
-            handleUpdateRow(item.id, "status", "processing");
-            
-            // 2. Process the file (this includes the fetch)
-            try {
-              await handleUploadFile(item.id, item.file, {
-                url: item.url,
-                uploadDate: item.uploadDate,
-              });
-            } catch (err: unknown) {
-              const msg = err instanceof Error ? err.message : String(err);
-              console.error(`Failed to process ${item.file.name}:`, err);
-              handleUpdateRow(item.id, "status", "error");
-              toast.error(`Lỗi xử lý ${item.file.name}: ${msg}`);
-            }
-            
-            // Yield briefly between files so rendering stays responsive. The
-            // fetch layer already applies retry/backoff for Google rate limits.
-            if (i < toProcess.length - 1) {
-              await new Promise(resolve => setTimeout(resolve, 150));
-            }
-          }
-          
-          toast.success(`Đã nạp xong từ thư mục! Thành công: ${successCount} trung tâm${skipCount > 0 ? `, Bỏ qua: ${skipCount}` : ""}.`);
+          toast.success(`Đã nạp xong từ thư mục! Thành công: ${completed}/${successCount} trung tâm${skipCount > 0 ? `, Bỏ qua: ${skipCount}` : ""}.`);
         } else {
           toast.warning(`Không tìm thấy trung tâm nào khớp với các file trong thư mục.`);
         }
@@ -270,11 +257,10 @@ export default function TimesheetSummaryPage({ onBack }: TimesheetSummaryPagePro
       const msg = error instanceof Error ? error.message : "Lỗi xử lý link";
       toast.error(msg);
     } finally {
+      urlInputBusy.current = false;
       setIsFetchingGgSheet(false);
     }
   };
-
-  const lastSummaryRef = useRef("");
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -915,19 +901,13 @@ export default function TimesheetSummaryPage({ onBack }: TimesheetSummaryPagePro
     staffData,
     cacheData,
     debouncedFromDate,
-    debouncedToDate
+    debouncedToDate,
+    true,
+    false,
   );
 
   useEffect(() => {
     if (computedData.isCalculating || computedData.error) return;
-    const signature = JSON.stringify({
-      emp: computedData.employeeSummary?.length || 0,
-      center: computedData.centerSummary?.length || 0,
-    });
-
-    if (lastSummaryRef.current === signature) return;
-    lastSummaryRef.current = signature;
-
     updateAppData(
       (prev: AppData) => ({
         ...prev,
