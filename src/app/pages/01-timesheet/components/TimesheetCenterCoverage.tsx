@@ -6,7 +6,9 @@ import {
 } from "../../../components/ui/dropdown-menu";
 
 export function TimesheetCenterCount({ coverage }: { coverage: MissingTimesheetCenters }) {
-  const description = coverage.centers.length
+  const description = coverage.isChecking
+    ? "Đang kiểm tra Center cho kỳ đã chọn"
+    : coverage.centers.length
     ? `Thiếu ${coverage.centers.length}/${coverage.expectedCount} Center có File/Link: ${coverage.centers.join(", ")}`
     : "Không có Center cần đồng bộ; bỏ qua Center đã đồng bộ thành công hoặc chỉ có dữ liệu ngoài thời gian đang lọc";
   return (
@@ -14,7 +16,7 @@ export function TimesheetCenterCount({ coverage }: { coverage: MissingTimesheetC
       <span className="text-[9px] font-bold text-foreground/60 uppercase tracking-tighter whitespace-nowrap">CENTER</span>
       <div className="bg-card px-2.5 py-0.5 rounded-md border border-border/60 shadow-2xs min-w-[34px] text-center">
         <span className={`text-xs font-black tabular-nums ${coverage.centers.length ? "text-destructive" : "text-foreground"}`}>
-          {coverage.centers.length.toLocaleString("vi-VN")}
+          {coverage.isChecking ? "…" : coverage.centers.length.toLocaleString("vi-VN")}
         </span>
       </div>
     </div>
@@ -31,7 +33,9 @@ export function TimesheetCenterSettings({ coverage }: { coverage: MissingTimeshe
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="z-[99999] w-72 bg-card border-border">
-        <DropdownMenuLabel>Center thiếu: {coverage.centers.length} / {coverage.expectedCount}</DropdownMenuLabel>
+        <DropdownMenuLabel>
+          {coverage.isChecking ? "Đang kiểm tra Center…" : `Center thiếu: ${coverage.centers.length} / ${coverage.expectedCount}`}
+        </DropdownMenuLabel>
         <DropdownMenuSeparator />
         {coverage.centers.length > 0 && (
           <p className="max-h-28 overflow-y-auto px-2 py-1 text-xs leading-relaxed text-muted-foreground">

@@ -20,6 +20,8 @@ export interface TimesheetCoverageDateRange {
   preferredYear?: number;
 }
 
+export const CENTER_COVERAGE_BATCH_ROWS = 750;
+
 const ROSTER_DATE_FIELDS = [
   "date", "ngay", "ngày", "tk_date", "session date", "sessiondate",
   "ngày học", "date of class", "scheduledate", "ngày làm việc",
@@ -32,7 +34,7 @@ export function normalizeTimesheetL07(value: unknown): string {
 }
 
 /** Check the complete table dataset before search, BU filters and pagination. */
-export function getMissingTimesheetCenters(
+function* scanMissingTimesheetCenters(
   inputs: readonly TimesheetLinkInput[],
   rows: readonly Record<string, unknown>[],
   mode: "l07" | "allocation" = "l07",
@@ -55,19 +57,20 @@ export function getMissingTimesheetCenters(
     if (!existing || (!existing.url?.trim() && input.url?.trim())) configured.set(l07, input);
   }
 
-  const present = new Set<string>();
+  // A successful import with no rows in this table does not need another fetch.
+  const candidates = new Map([...configured].filter(([, input]) => input.status !== "success"));
+  let batchRows = 0;
   for (const row of rows) {
+    if (candidates.size === 0) break;
+    if (++batchRows % CENTER_COVERAGE_BATCH_ROWS === 0) yield;
     if (row._isSubtotal || row._isTotalRow) continue;
     const l07 = mode === "allocation"
       ? row.chargeToCenterMkt || row.charge_to_center_mkt || row.l07 || row.center
       : row.l07 || row.L07 || row.center;
     const normalized = normalize(l07);
-    if (normalized) present.add(normalized);
+    candidates.delete(normalized);
   }
 
-  // A completed import can legitimately have no rows in this table. Do not
-  // repeatedly fetch it; Settings Actions still allows an explicit resync.
-  const candidates = new Map([...configured].filter(([l07, input]) => !present.has(l07) && input.status !== "success"));
   const outsideTimeRange = new Set<string>();
   if ((source?.from || source?.to) && candidates.size > 0) {
     const eligibleOrUnknownDate = new Set<string>();
@@ -77,6 +80,8 @@ export function getMissingTimesheetCenters(
     });
     const dateCache = new Map<unknown, string | null>();
     for (const row of source.rows) {
+      if (eligibleOrUnknownDate.size === candidates.size) break;
+      if (++batchRows % CENTER_COVERAGE_BATCH_ROWS === 0) yield;
       if (row._isSubtotal || row._isTotalRow) continue;
       const input = inputById.get(String(row._rowId || ""));
       const sourceL07 = normalize(input?.l07 || getVal(row, ["l07", "center", "maAE", "aeCode"]));
@@ -105,4 +110,25 @@ export function getMissingTimesheetCenters(
     centers: missing.map(([l07]) => l07),
     inputs: missing.map(([, input]) => input),
   };
+}
+
+type CoverageArguments = Parameters<typeof scanMissingTimesheetCenters>;
+
+export function getMissingTimesheetCenters(...args: CoverageArguments) {
+  const scan = scanMissingTimesheetCenters(...args);
+  let next = scan.next();
+  while (!next.done) next = scan.next();
+  return next.value;
+}
+
+export async function getMissingTimesheetCentersInBatches(
+  signal: AbortSignal,
+  ...args: CoverageArguments
+) {
+  const scan = scanMissingTimesheetCenters(...args);
+  while (!signal.aborted) {
+    const next = scan.next();
+    if (next.done) return next.value;
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+  }
 }

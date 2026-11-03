@@ -28,26 +28,30 @@ function normalizeText(value: unknown): string {
     .replace(/\s+/g, " ");
 }
 
-function firstValue(row: RosterRow, keys: string[]): unknown {
-  for (const key of keys) {
-    const value = row[key];
-    if (value !== undefined && value !== null && String(value).trim() !== "") {
-      return value;
+function rosterFieldReader(row: RosterRow) {
+  let normalizedValues: Map<string, unknown> | undefined;
+  return (keys: readonly string[]): unknown => {
+    for (const key of keys) {
+      const value = row[key];
+      if (value !== undefined && value !== null && String(value).trim() !== "") {
+        return value;
+      }
     }
-  }
 
-  const entries = Object.entries(row);
-  for (const key of keys) {
-    const normalizedKey = normalizeText(key);
-    const entry = entries.find(([candidate, value]) =>
-      normalizeText(candidate) === normalizedKey &&
-      value !== undefined &&
-      value !== null &&
-      String(value).trim() !== "",
-    );
-    if (entry) return entry[1];
-  }
-  return "";
+    if (!normalizedValues) {
+      normalizedValues = new Map();
+      for (const [key, value] of Object.entries(row)) {
+        if (value === undefined || value === null || String(value).trim() === "") continue;
+        const normalized = normalizeText(key);
+        if (!normalizedValues.has(normalized)) normalizedValues.set(normalized, value);
+      }
+    }
+    for (const key of keys) {
+      const value = normalizedValues.get(normalizeText(key));
+      if (value !== undefined) return value;
+    }
+    return "";
+  };
 }
 
 function normalizeDate(value: unknown): string {
@@ -118,17 +122,6 @@ export function getCanonicalTimesheetCenter(row: RosterRow): string {
   return center;
 }
 
-function getCanonicalChargeCenter(row: RosterRow): string {
-  const value = firstValue(row, [
-    "charge_to_center_mkt",
-    "chargeToCenterMkt",
-    "Charge to Center MKT",
-    "Charge to Center",
-  ]);
-  const source = String(value ?? "").trim();
-  return source ? normalizeText(mapL07(source)) : "";
-}
-
 /**
  * Logical identity of one Timesheet session. Internal import IDs and source
  * filenames are deliberately excluded so re-syncing the same Google Sheet is
@@ -137,23 +130,27 @@ function getCanonicalChargeCenter(row: RosterRow): string {
 export function getTimesheetRosterBusinessKey(row: RosterRow): string {
   const cached = businessKeyCache.get(row);
   if (cached !== undefined) return cached;
-  const employee = normalizeText(firstValue(row, [
+  const readField = rosterFieldReader(row);
+  const employee = normalizeText(readField([
     "ma_nv", "employeeId", "ID Number", "Mã NV", "Teacher ID", "Emp ID",
   ]));
-  const date = normalizeDate(firstValue(row, [
+  const date = normalizeDate(readField([
     "ngay", "date", "Date", "Ngày", "TK_Date", "Session Date",
   ]));
-  const from = normalizeTime(firstValue(row, [
+  const from = normalizeTime(readField([
     "gio_vao", "from", "From", "Start", "Start Time",
   ]));
-  const to = normalizeTime(firstValue(row, [
+  const to = normalizeTime(readField([
     "gio_ra", "to", "To", "End", "End Time",
   ]));
-  const type = normalizeText(firstValue(row, ["type", "taskType", "Type", "Task Type"]));
-  const classCode = normalizeText(firstValue(row, ["class", "classCode", "Class", "Lớp"]));
-  const duration = Number(firstValue(row, ["duration", "workingHours", "Working Hours"])) || 0;
+  const type = normalizeText(readField(["type", "taskType", "Type", "Task Type"]));
+  const classCode = normalizeText(readField(["class", "classCode", "Class", "Lớp"]));
+  const duration = Number(readField(["duration", "workingHours", "Working Hours"])) || 0;
   const center = getCanonicalTimesheetCenter(row);
-  const chargeCenter = getCanonicalChargeCenter(row);
+  const chargeValue = String(readField([
+    "charge_to_center_mkt", "chargeToCenterMkt", "Charge to Center MKT", "Charge to Center",
+  ]) ?? "").trim();
+  const chargeCenter = chargeValue ? normalizeText(mapL07(chargeValue)) : "";
 
   const core = [
     center,

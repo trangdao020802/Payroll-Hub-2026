@@ -906,7 +906,7 @@ export function TimesheetHub() {
     if (activeTab === "mkt_local_north") return mktLocalNorthData;
     if (activeTab === "type_rates") return [{ id: "type_rates_active" }];
     return [];
-  }, [view, activeTab, calculatedRosterData, displayCenterSummary, displayEmployeeSummary, isCalculating, mktLocalNorthData, processedRosterData]);
+  }, [view, activeTab, displayCenterSummary, displayEmployeeSummary, mktLocalNorthData, processedRosterData]);
 
   const centerCoverageRows = useMemo(() => activeTab === "mkt_local_north"
     ? currentData.filter((row: Record<string, unknown>) => String(row.taskType || row.type || row.sourceType || "").trim())
@@ -919,7 +919,7 @@ export function TimesheetHub() {
       to: debouncedToDate,
       preferredYear: uiSettings.defaultAuditYear || Number(debouncedFromDate.slice(0, 4)) || new Date().getFullYear(),
     },
-    view === "final",
+    view === "final" && activeTab !== "type_rates" && !isCalculating && !calculationError,
   );
 
   const rosterMetrics = useMemo(() => {
@@ -1161,9 +1161,10 @@ export function TimesheetHub() {
       chargeToCenterMkt: string;
       values: Record<string, number>;
       total: number;
-      sourceRowKeys: string[];
-      sourceRowKeysByType: Record<string, string[]>;
+      sourceRowKeys: Set<string>;
+      sourceRowKeysByType: Map<string, Set<string>>;
     }>();
+    const resolvedCenters = new Map<string, ReturnType<typeof resolveMktRosterCenter>>();
 
     searchData.forEach((r: any) => {
       const type = String(r.taskType || r.type || r.sourceType || "").trim().toUpperCase();
@@ -1173,7 +1174,11 @@ export function TimesheetHub() {
       // Pivot allocation follows the destination L07, not the generic MKT
       // source BU. This makes TN0001.LNQ -> ATN and TH0001.TPU -> ATH
       // authoritative even for rows imported with a stale AHN value.
-      const resolved = resolveMktRosterCenter(chargeMkt);
+      let resolved = resolvedCenters.get(chargeMkt);
+      if (!resolved) {
+        resolved = resolveMktRosterCenter(chargeMkt);
+        resolvedCenters.set(chargeMkt, resolved);
+      }
       const canonicalChargeMkt = resolved.l07 || mapL07(chargeMkt) || chargeMkt;
       const knownAllocation = getCenterInfoByL07(canonicalChargeMkt);
       const bus = resolved.business
@@ -1190,19 +1195,21 @@ export function TimesheetHub() {
           chargeToCenterMkt: canonicalChargeMkt,
           values: {},
           total: 0,
-          sourceRowKeys: [],
-          sourceRowKeysByType: {},
+          sourceRowKeys: new Set(),
+          sourceRowKeysByType: new Map(),
         });
       }
 
       const item = map.get(key)!;
       const sourceRowKey = getRosterSourceKey(r);
-      if (sourceRowKey && !item.sourceRowKeys.includes(sourceRowKey)) {
-        item.sourceRowKeys.push(sourceRowKey);
-      }
-      if (!item.sourceRowKeysByType[type]) item.sourceRowKeysByType[type] = [];
-      if (sourceRowKey && !item.sourceRowKeysByType[type].includes(sourceRowKey)) {
-        item.sourceRowKeysByType[type].push(sourceRowKey);
+      if (sourceRowKey) {
+        item.sourceRowKeys.add(sourceRowKey);
+        let typeKeys = item.sourceRowKeysByType.get(type);
+        if (!typeKeys) {
+          typeKeys = new Set();
+          item.sourceRowKeysByType.set(type, typeKeys);
+        }
+        typeKeys.add(sourceRowKey);
       }
       const hours = Number(r.workingHours ?? r.duration) || 0;
       // Value: working hours * 20,000 as requested
@@ -1241,12 +1248,10 @@ export function TimesheetHub() {
   }, [mktPivotRows, mktPivotUniqueTypes]);
 
   const handleMktPivotCellChange = useCallback((row: any, field: string, value: unknown) => {
-    const sourceKeys = new Set<string>(
-      field === "chargeToCenterMkt"
-        ? row.sourceRowKeys || []
-        : row.sourceRowKeysByType?.[field] || [],
-    );
-    if (sourceKeys.size === 0) {
+    const sourceKeys: ReadonlySet<string> | undefined = field === "chargeToCenterMkt"
+      ? row.sourceRowKeys
+      : row.sourceRowKeysByType?.get(field);
+    if (!sourceKeys?.size) {
       toast.error("Không tìm thấy dòng dữ liệu nguồn để cập nhật.");
       return;
     }

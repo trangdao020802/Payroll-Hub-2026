@@ -23,8 +23,12 @@ import {
 } from "../constants/timesheet-logic";
 
 const MAX_OVERLAP_PREVIEW_ROWS = 30;
+const employeeIdCollator = new Intl.Collator("vi", { numeric: true });
+const classCollator = new Intl.Collator("vi");
 
-export function calculateTimesheet(params: any) {
+type TimesheetSourceCache = { uniqueRoster?: any[] };
+
+export function calculateTimesheet(params: any, sourceCache?: TimesheetSourceCache) {
   try {
     const includeDetails = params.includeProcessedRosterData !== false;
     const {
@@ -75,6 +79,7 @@ export function calculateTimesheet(params: any) {
     ...(customSalaryRates || {}),
   };
 
+  const customTypes = { ...(appData?.customTypeRates || {}), ...(customTypeRates || {}) };
   const inputListLookup = new Map();
   const discardedLegacyRowIds = new Set<string>();
   (appData?.Timesheet_InputList || []).forEach((ir: any) => {
@@ -129,7 +134,8 @@ export function calculateTimesheet(params: any) {
   // Final safety gate: legacy sessions may already contain copies created by
   // repeated Google Sheet syncs. Exact logical sessions must be collapsed
   // before overlap detection and every downstream payroll aggregation.
-  const uniqueRosterData = dedupeTimesheetRosterRows(rosterData);
+  const uniqueRosterData = sourceCache?.uniqueRoster ?? dedupeTimesheetRosterRows(rosterData);
+  if (sourceCache) sourceCache.uniqueRoster = uniqueRosterData;
   uniqueRosterData.forEach((t: any) => {
     if (discardedLegacyRowIds.has(String(t._rowId || ""))) return;
     const configuredInput = inputListLookup.get(t._rowId) as any;
@@ -302,7 +308,6 @@ export function calculateTimesheet(params: any) {
     const rates = getSalaryRate(empId, effName);
     let money = 0;
     let activeRate = rates.ad;
-    const customTypes = { ...(appData?.customTypeRates || {}), ...(customTypeRates || {}) };
     if (rawLoai === "KL") {
       money = 0;
       activeRate = 0;
@@ -417,8 +422,11 @@ export function calculateTimesheet(params: any) {
   // -------------------------------------------------------------------------
   // TIME & OVERLAP HELPERS
   // -------------------------------------------------------------------------
+  const minutesByTime = new Map<string, number>();
   function timeToMinutes(timeStr: string): number {
     if (!timeStr) return 0;
+    const cached = minutesByTime.get(timeStr);
+    if (cached !== undefined) return cached;
     const upper = timeStr.trim().toUpperCase();
     const isPM = upper.includes("PM");
     const isAM = upper.includes("AM");
@@ -431,7 +439,9 @@ export function calculateTimesheet(params: any) {
     if (isPM && hours < 12) hours += 12;
     else if (isAM && hours === 12) hours = 0;
     
-    return hours * 60 + minutes;
+    const total = hours * 60 + minutes;
+    minutesByTime.set(timeStr, total);
+    return total;
   }
 
   function checkShiftOverlap(shiftA: any, shiftB: any): boolean {
@@ -609,7 +619,7 @@ export function calculateTimesheet(params: any) {
       if (component.length < 2) return;
       component.sort((left, right) => {
         const timeDifference = windows[left].start - windows[right].start;
-        return timeDifference || String(group[left].class || "").localeCompare(String(group[right].class || ""), "vi");
+        return timeDifference || classCollator.compare(group[left].class || "", group[right].class || "");
       });
       const groupCode = `TL-${String(++overlapGroupSequence).padStart(3, "0")}`;
 
@@ -647,7 +657,7 @@ export function calculateTimesheet(params: any) {
   // Re-sort details so overlapping shifts are placed at consecutive rows right under each other
   details.sort((a, b) => {
     // 1. Group by Employee ID
-    const empCmp = String(a.ma_nv || "").localeCompare(String(b.ma_nv || ""), "vi", { numeric: true });
+    const empCmp = employeeIdCollator.compare(a.ma_nv || "", b.ma_nv || "");
     if (empCmp !== 0) return empCmp;
 
     // 2. Group by Date
@@ -881,6 +891,7 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
     data: Record<(typeof inputFields)[number], any[]>;
   } | null = null;
   let sourceData: Record<(typeof inputFields)[number], any[]> | null = null;
+  let sourceCache: TimesheetSourceCache = {};
   let recalculateTimer: ReturnType<typeof setTimeout> | undefined;
 
   const resultFields = ["processedRosterData", "employeeSummary", "centerSummary"] as const;
@@ -963,7 +974,7 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
       }
       clearTimeout(recalculateTimer);
       recalculateTimer = setTimeout(() => {
-        if (sourceData) postChunkedResult(calculateTimesheet({ ...message.params, ...sourceData }), message.requestId, true);
+        if (sourceData) postChunkedResult(calculateTimesheet({ ...message.params, ...sourceData }, sourceCache), message.requestId, true);
       }, 40);
       return;
     }
@@ -977,6 +988,7 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
       pendingOutput = null;
       clearTimeout(recalculateTimer);
       sourceData = null;
+      sourceCache = {};
       pendingInput = {
         requestId: message.requestId,
         params: message.params || {},
@@ -1003,7 +1015,7 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
       pendingInput = null;
       sourceData = request.data;
       postChunkedResult(
-        calculateTimesheet({ ...request.params, ...request.data }),
+        calculateTimesheet({ ...request.params, ...request.data }, sourceCache),
         request.requestId,
         request.params.resultBackpressure === true,
       );

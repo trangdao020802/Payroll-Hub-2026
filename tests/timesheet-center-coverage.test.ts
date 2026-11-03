@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getMissingTimesheetCenters } from "../src/app/lib/utils/timesheet-center-coverage";
+import { getMissingTimesheetCenters, getMissingTimesheetCentersInBatches } from "../src/app/lib/utils/timesheet-center-coverage";
 import { applyTimesheetLinkResult } from "../src/app/lib/utils/timesheet-link-sync";
 import { INITIAL_APP_DATA } from "../src/app/constants/initial-data";
 
@@ -134,4 +134,23 @@ test("link refresh replaces the center and its legacy rows without duplicating o
   assert.equal(twice.Timesheet_InputList[0].count, 1);
   assert.deepEqual(twice.Timesheet_InputList[0].legacyRowIds, []);
   assert.equal(before.Timesheet_Roster[0].duration, 1);
+});
+
+test("large Center scans yield, preserve date filtering, and abandon an outdated query", async () => {
+  const inputs = [
+    { id: "outside", l07: "TH0001.TPU", url: "old-sheet" },
+    { id: "missing", l07: "VP0001.PCT", url: "missing-sheet" },
+  ];
+  const range = {
+    from: "2026-09-21", to: "2026-10-20",
+    rows: Array.from({ length: 2400 }, () => ({ _rowId: "outside", ngay: "20/09/2026" })),
+  };
+  const controller = new AbortController();
+  const obsolete = getMissingTimesheetCentersInBatches(controller.signal, inputs, [], "l07", range);
+  controller.abort();
+  assert.equal(await obsolete, undefined, "an outdated scan must yield and stop before publishing results");
+
+  const current = await getMissingTimesheetCentersInBatches(new AbortController().signal, inputs, [], "l07", range);
+  assert.deepEqual(current?.centers, ["VP0001.PCT"]);
+  assert.deepEqual(current, getMissingTimesheetCenters(inputs, [], "l07", range));
 });
