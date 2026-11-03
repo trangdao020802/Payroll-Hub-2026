@@ -989,8 +989,9 @@ export default function TimesheetSummaryPage({ onBack }: TimesheetSummaryPagePro
           className="unified-table-frame-header relative z-10 flex min-h-[56px] w-full min-w-0 shrink-0 flex-col items-stretch justify-between gap-2 bg-[var(--table-header-bg,#FAF3E8)] px-4 py-2.5 md:flex-row md:items-center border-b border-border"
         >
           {computedData?.error && (
-            <div className="absolute top-0 left-0 right-0 bg-red-100 text-red-600 p-2 text-center text-xs font-bold z-50">
-              WORKER ERROR: {computedData.error}
+            <div role="alert" className="absolute top-0 left-0 right-0 z-50 flex items-center justify-center gap-3 bg-red-100 p-2 text-xs text-red-800">
+              <span>Không thể tính lại Timesheet. {computedData.error}</span>
+              <button type="button" className="shrink-0 rounded-full border border-red-300 px-3 py-1 font-medium" onClick={computedData.retry}>Thử lại</button>
             </div>
           )}
           {isSyncing && (

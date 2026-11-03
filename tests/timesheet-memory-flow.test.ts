@@ -10,6 +10,7 @@ import { applyTimesheetLinkResult, fetchTimesheetFolderFiles } from "../src/app/
 import { fetchGoogleSheetAsFile } from "../src/app/lib/utils/data-utils";
 import { INITIAL_APP_DATA } from "../src/app/constants/initial-data";
 import { calculateTimesheet } from "../src/app/workers/timesheet.worker";
+import { parseExcelData, prepareExcelResult, type ExcelParseResult } from "../src/app/workers/excelParser.worker";
 
 test("rapid link requests run one at a time, stay busy through the queue and recover after a failed link", async () => {
   const states: boolean[] = [];
@@ -191,14 +192,16 @@ test("Excel parsing releases its worker after the last result and recovers after
 test("Excel producer waits for each acknowledgement and delivers every row in bounded chunks", async () => {
   const result = await build({ entryPoints: ["src/app/workers/excelParser.worker.ts"], bundle: true,
     write: false, platform: "node", format: "cjs", packages: "external" });
-  type Message = { type: string; requestId: string; rows?: Record<string, unknown>[]; chunkId?: number; success?: boolean };
+  type Message = { type: string; requestId: string; rows?: Record<string, unknown>[]; chunkId?: number; success?: boolean; result?: ExcelParseResult };
   const messages: Message[] = [];
   const scope = { onmessage: (event: { data: unknown }) => { void event; }, postMessage: (message: Message) => messages.push(structuredClone(message)) };
   const module = { exports: {} };
   new Function("require", "module", "exports", "self", result.outputFiles[0].text)(createRequire(import.meta.url), module, module.exports, scope);
-  const csv = "CENTER,ID NUMBER,FULL NAME,DATE,TYPE,FROM,TO,DURATION\n" + Array.from({ length: 2_505 }, (_, i) =>
-    `HN0027.OPK,EMP${i},Test Person,15/09/2026,IN-CLASS,09:00,11:00,2`).join("\n");
-  scope.onmessage({ data: { requestId: "parse", fileName: "roster.csv", fileBuffer: new TextEncoder().encode(csv).buffer,
+  const fileName = "North.MKT Roster.csv";
+  const csv = "\uFEFFCenter,ID,Name,Date,Code,Class,From,To,Duration,Notes,Hour,Total\r\n" + Array.from({ length: 2_505 }, (_, i) =>
+    `MKT LOCAL NORTH,${String(i + 1).padStart(12, "0")},Tên thử,Mon 2026-9-21,LPAR01,Vu Tong Phan,08:00,12:00,4:00,"Họp, ghi chú ""North""\r\nDòng 2",4.00,"80,000"`).join("\r\n");
+  const fileBuffer = new TextEncoder().encode(csv).buffer;
+  scope.onmessage({ data: { requestId: "parse", fileName, fileBuffer,
     fileId: "source", mode: "roster", resultBackpressure: true } });
   assert.equal(messages.length, 2);
   assert.equal(messages.shift()!.type, "excel-result-start");
@@ -220,6 +223,14 @@ test("Excel producer waits for each acknowledgement and delivers every row in bo
   assert.equal(received.length, 2_505);
   assert.equal(new Set(received.map(row => row.ma_nv)).size, 2_505);
   assert.ok(received.every(row => row._rowId === "source"));
+  assert.equal(received[0].ma_nv, "000000000001");
+  assert.equal(received[0].Notes, 'Họp, ghi chú "North"\nDòng 2');
+  assert.deepEqual(received, prepareExcelResult(parseExcelData(fileBuffer, fileName), fileName, "source", "roster").rows);
+
+  const semicolon = "sep=;\r\nCenter;ID;Name;Date\r\nHN0027.OPK;00123;Test Person;15/09/2026";
+  scope.onmessage({ data: { requestId: "legacy-csv", fileName: "roster.csv", fileId: "source",
+    fileBuffer: new TextEncoder().encode(semicolon).buffer, mode: "roster" } });
+  assert.equal(messages.shift()?.result?.rows[0]?.ma_nv, "00123");
 });
 
 test("Settings calculates identical payroll totals without returning unused detailed roster rows", () => {

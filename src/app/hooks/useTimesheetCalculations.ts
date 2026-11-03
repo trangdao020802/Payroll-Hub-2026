@@ -207,7 +207,7 @@ export function useTimesheetCalculations(
         };
         worker.onerror = (err: ErrorEvent | any) => {
           if (cancelled || workerRef.current !== worker) return;
-          const errorDetails = err?.message || (err?.error?.message ? err.error.message : "Web Worker runtime error");
+          const errorDetails = err?.message || err?.error?.message;
           console.warn("Timesheet worker warning:", errorDetails);
           worker.onmessage = null;
           worker.onerror = null;

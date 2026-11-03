@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as XLSX from "xlsx";
+import { csvParseRows } from "d3";
 import { mapExcelRosterRow } from "../lib/utils/roster-row-utils";
 import { mapL07 } from '../lib/utils/center-utils';
 import {
@@ -132,6 +133,7 @@ export function parseExcelData(
         type: "string",
         cellDates: true,
         raw: true,
+        dense: true,
       })
     : XLSX.read(fileBuffer, {
         type: "array",
@@ -208,7 +210,6 @@ export function parseExcelData(
     const parsedRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(
       worksheet,
       {
-        defval: "",
         blankrows: false,
         raw: false,
         range:
@@ -217,6 +218,9 @@ export function parseExcelData(
             : (decodedRange?.s.r || 0) + headerRowIndex,
       },
     );
+    // The formatted rows own their values. Let the workbook cells go before
+    // constructing the roster, particularly for large Google Sheet exports.
+    delete workbook.Sheets[sheetName];
     const isMktLocalNorthRoster =
       isMktLocalNorthFileName(fileName) && isRosterSheetName(sheetName);
 
@@ -293,6 +297,51 @@ function classifyRows(
   return "roster";
 }
 
+function finishRosterRows(mappedRows: Record<string, unknown>[], sourceId: string): ExcelParseResult {
+  const rows = dedupeTimesheetRosterRows(mappedRows);
+  for (const row of rows) {
+    row._uuid = createStableTimesheetRowId(row, sourceId);
+  }
+  return { kind: "roster", rows };
+}
+
+function parseRosterCsv(fileBuffer: ArrayBuffer, fileName: string, fileId?: string): ExcelParseResult | null {
+  const csv = new TextDecoder("utf-8").decode(fileBuffer);
+  if (/^sep=[^,]/i.test(csv)) return null;
+  const mappedRows: Record<string, unknown>[] = [];
+  let headers: string[] | undefined;
+  let previewRemaining = 50;
+
+  // Google Sheets exports comma-delimited text. Mapping each row as it is
+  // read avoids an expanded workbook and a second array of raw records.
+  csvParseRows(csv, (cells) => {
+    if (!headers) {
+      if (!previewRemaining || !cells.some(cell => cell.trim())) return null;
+      previewRemaining--;
+      if (findHeaderRow([cells]) !== 0) return null;
+      previewRemaining = 0;
+      const keys = cells.map(key => key.toLowerCase().includes("__empty") ? "" : key);
+      const names = keys.filter(Boolean);
+      // Let SheetJS handle ambiguous headers and other delimiter formats.
+      if (names.length >= 2 && new Set(names).size === names.length && !names.includes("__proto__")) {
+        headers = keys;
+      }
+      return null;
+    }
+
+    const row: Record<string, unknown> = {};
+    for (let index = 0; index < Math.min(cells.length, headers.length); index++) {
+      const key = headers[index];
+      const value = cells[index];
+      if (key && value.trim()) row[key] = value.replace(/\r\n/g, "\n");
+    }
+    if (Object.keys(row).length) mappedRows.push(mapExcelRosterRow(row, fileName, fileId));
+    return null;
+  });
+
+  return mappedRows.length ? finishRosterRows(mappedRows, fileId || fileName) : null;
+}
+
 export function prepareExcelResult(
   rawRows: Record<string, unknown>[],
   fileName: string,
@@ -302,16 +351,10 @@ export function prepareExcelResult(
   if (mode === "raw") return { kind: "raw", rows: rawRows };
   const kind = mode === "roster" ? "roster" : classifyRows(rawRows, fileName);
   if (kind === "roster") {
-    const mappedRows = dedupeTimesheetRosterRows(
+    return finishRosterRows(
       rawRows.map((row) => mapExcelRosterRow(row, fileName, fileId)),
+      fileId || fileName,
     );
-    return {
-      kind,
-      rows: mappedRows.map((row) => ({
-        ...row,
-        _uuid: createStableTimesheetRowId(row, fileId || fileName),
-      })),
-    };
   }
 
   return {
@@ -355,8 +398,10 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
       mode = "auto",
     } = event.data;
     try {
-      const rawRows = parseExcelData(fileBuffer, fileName);
-      const result = prepareExcelResult(rawRows, fileName, fileId, mode);
+      const csvRoster = mode === "roster" && fileName?.toLowerCase().endsWith(".csv")
+        ? parseRosterCsv(fileBuffer, fileName, fileId)
+        : null;
+      const result = csvRoster ?? prepareExcelResult(parseExcelData(fileBuffer, fileName), fileName, fileId, mode);
       if (event.data.resultBackpressure) {
         outputs.set(requestId, { result, offset: 0, chunkId: 0 });
         self.postMessage({ type: "excel-result-start", requestId, kind: result.kind });

@@ -818,10 +818,8 @@ async function downloadGoogleSheet(
       }
     }
 
-    const fileBuffer = await response.arrayBuffer();
-    const payloadPreview = new TextDecoder("utf-8").decode(
-      fileBuffer.slice(0, 2048),
-    );
+    const fileBlob = await response.blob();
+    const payloadPreview = await fileBlob.slice(0, 2048).text();
     if (
       contentType.includes("text/html") ||
       looksLikeHtmlPayload(payloadPreview)
@@ -841,11 +839,11 @@ async function downloadGoogleSheet(
         ? requestedName.replace(/\.(csv|txt|gsheet)$/i, extension)
         : requestedName.replace(/\.(xlsx?|xls)$/i, extension)
       : `${requestedName}${extension}`;
-    if (fileBuffer.byteLength === 0) {
+    if (fileBlob.size === 0) {
       throw new Error("Google Sheet trả về file rỗng.");
     }
 
-    return new File([fileBuffer], finalName, {
+    return new File([fileBlob], finalName, {
       type: isExcel
         ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         : "text/csv;charset=utf-8",
@@ -870,13 +868,13 @@ async function downloadGoogleSheet(
     try {
       const directRes = await fetch(directUrl, { signal });
       if (directRes.ok) {
-        const text = await directRes.text();
-        if (text && !looksLikeHtmlPayload(text)) {
+        const fileBlob = await directRes.blob();
+        if (fileBlob.size && !looksLikeHtmlPayload(await fileBlob.slice(0, 2048).text())) {
           const requestedName = String(name || "GoogleSheet").trim();
           const finalName = requestedName.toLowerCase().endsWith(".csv")
             ? requestedName
             : requestedName.replace(/\.(xlsx?|xls|gsheet|txt)$/i, "") + ".csv";
-          return new File([text], finalName, {
+          return new File([fileBlob], finalName, {
             type: "text/csv;charset=utf-8",
           });
         }

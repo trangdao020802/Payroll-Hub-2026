@@ -86,7 +86,7 @@ function getExcelWorker() {
     }
   };
   excelWorker.onerror = (event) => {
-    failExcelWorker(event.message || "Excel Worker đã dừng bất thường.");
+    failExcelWorker(event.message || "Bộ đọc file đã dừng. Tải lại trang rồi thử cập nhật link.");
   };
   excelWorker.onmessageerror = () => failExcelWorker("Không thể nhận dữ liệu từ Excel Worker. Vui lòng thử lại.");
   return excelWorker;
