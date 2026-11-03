@@ -12,6 +12,7 @@ type PendingExcelRequest = {
   timeoutMs: number;
   result?: ExcelParseResult;
   chunkId?: number;
+  rosterIndexes?: Map<string, number>;
 };
 
 let excelWorker: Worker | null = null;
@@ -57,11 +58,26 @@ function getExcelWorker() {
       return;
     }
     if (event.data?.type === "excel-result-chunk") {
-      if (!pending.result || event.data.chunkId !== (pending.chunkId || 0) + 1 || !Array.isArray(event.data.rows)) {
+      const { rows, keys } = event.data;
+      if (!pending.result || event.data.chunkId !== (pending.chunkId || 0) + 1 || !Array.isArray(rows) ||
+          (keys === undefined ? pending.rosterIndexes !== undefined :
+            pending.result.kind !== "roster" || !Array.isArray(keys) || keys.length !== rows.length || keys.some(key => typeof key !== "string"))) {
         failExcelWorker("Dữ liệu file truyền không đầy đủ. Vui lòng thử đồng bộ lại.");
         return;
       }
-      for (const row of event.data.rows) pending.result.rows.push(row);
+      if (keys) {
+        const indexes = pending.rosterIndexes ??= new Map();
+        const resultRows = pending.result.rows;
+        for (let index = 0; index < rows.length; index++) {
+          const key = keys[index];
+          const previous = indexes.get(key);
+          if (previous !== undefined) delete resultRows[previous];
+          indexes.set(key, resultRows.length);
+          resultRows.push(rows[index]);
+        }
+      } else {
+        for (const row of rows) pending.result.rows.push(row);
+      }
       pending.chunkId = event.data.chunkId;
       const worker = excelWorker;
       // Let input, paint and other queued work run before accepting more rows.
@@ -78,6 +94,9 @@ function getExcelWorker() {
     // before the calculation worker receives the imported rows.
     if (pendingExcelRequests.size === 0) releaseExcelWorker();
     if (event.data?.success) {
+      if (pending.result && pending.rosterIndexes && pending.rosterIndexes.size < pending.result.rows.length) {
+        pending.result.rows = pending.result.rows.filter(Boolean);
+      }
       pending.resolve(pending.result || event.data.result as ExcelParseResult);
     } else {
       pending.reject(
@@ -113,6 +132,7 @@ export const parseExcelInWorker = async (
           fileId: options.fileId,
           mode: options.mode || "auto",
           resultBackpressure: true,
+          rosterCsvStreaming: options.mode === "roster",
         },
         [buffer],
       );

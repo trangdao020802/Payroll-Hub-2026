@@ -39,11 +39,14 @@ export function useTimesheetLinkSync() {
           ...row, status: "processing", ...(urlOverride ? { url: urlOverride } : {}),
         } : row),
       }), false);
+      let step = "Tải Google Sheet";
       try {
         const source = await resolveTimesheetLink({ ...input, url: urlOverride || input.url });
         const file = await fetchGoogleSheetAsFile(source.url, input.sheetName || "Sheet1");
         if (!file) throw new Error("Không lấy được nội dung file.");
+        step = "Đọc dữ liệu Roster";
         const parsed = await parseExcelInWorker(file, { fileId: id, mode: "roster" });
+        step = "Cập nhật Roster";
         const current = latestData.current;
         const currentInput = current.Timesheet_InputList.find(row => row.id === id);
         const prepared = await prepareTimesheetRosterReplacement(current.Timesheet_Roster || [], parsed.rows, {
@@ -65,7 +68,7 @@ export function useTimesheetLinkSync() {
           ...previous,
           Timesheet_InputList: previous.Timesheet_InputList.map((row) => row.id === id ? { ...row, status: "error" } : row),
         }), false);
-        toast.error(`${input.l07}: ${error instanceof Error ? error.message : String(error)}`);
+        toast.error(`${input.l07} · ${step}`, { description: error instanceof Error ? error.message : String(error) });
         return null;
       } finally {
         pendingSources.delete(id);

@@ -34,6 +34,16 @@ export default defineConfig({
     target: ['es2015', 'safari13'],
     cssTarget: 'safari13',
   },
+  worker: {
+    rollupOptions: {
+      output: {
+        // Keep the v1 messages compatible with tabs opened before a deployment.
+        entryFileNames: ({ name }) => ['excelParser.worker', 'timesheet.worker'].includes(name)
+          ? 'workers/[name]-v1.js'
+          : 'assets/[name]-[hash].js',
+      },
+    },
+  },
   resolve: {
     alias: {
       // Alias @ to the src directory

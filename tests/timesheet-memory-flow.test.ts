@@ -118,7 +118,7 @@ test("already normalized raw rows are shared instead of copied on every sync", (
 });
 
 test("Excel parsing releases its worker after the last result and recovers after a worker failure", async () => {
-  type Reply = { requestId: string; success?: boolean; result?: unknown; type?: string; kind?: string; rows?: unknown[]; chunkId?: number };
+  type Reply = { requestId: string; success?: boolean; result?: unknown; type?: string; kind?: string; rows?: unknown[]; keys?: string[]; chunkId?: number };
   class ParserWorker {
     onmessage: ((event: { data: Reply }) => void) | null = null;
     onerror: ((event: { message: string }) => void) | null = null;
@@ -171,13 +171,14 @@ test("Excel parsing releases its worker after the last result and recovers after
   const chunkWorker = workers[3];
   const requestId = chunkWorker.requests[0].requestId;
   chunkWorker.onmessage!({ data: { type: "excel-result-start", requestId, kind: "roster" } });
-  chunkWorker.onmessage!({ data: { type: "excel-result-chunk", requestId, chunkId: 1, rows: ["first"] } });
+  chunkWorker.onmessage!({ data: { type: "excel-result-chunk", requestId, chunkId: 1,
+    rows: ["superseded", "retained"], keys: ["A", "B"] } });
   assert.equal(chunkWorker.requests.length, 1, "acknowledgement must wait for an event-loop turn");
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(chunkWorker.requests.length, 2);
-  chunkWorker.onmessage!({ data: { type: "excel-result-chunk", requestId, chunkId: 2, rows: ["last"] } });
+  chunkWorker.onmessage!({ data: { type: "excel-result-chunk", requestId, chunkId: 2, rows: ["last"], keys: ["A"] } });
   chunkWorker.onmessage!({ data: { type: "excel-result-complete", requestId, success: true } });
-  assert.deepEqual(await chunked, { kind: "roster", rows: ["first", "last"] });
+  assert.deepEqual(await chunked, { kind: "roster", rows: ["retained", "last"] });
   assert.equal(chunkWorker.terminated, true);
 
   const stalled = module.exports.parseExcelInWorker({ name: "stalled.csv" }, { timeoutMs: 5 });
@@ -192,17 +193,17 @@ test("Excel parsing releases its worker after the last result and recovers after
 test("Excel producer waits for each acknowledgement and delivers every row in bounded chunks", async () => {
   const result = await build({ entryPoints: ["src/app/workers/excelParser.worker.ts"], bundle: true,
     write: false, platform: "node", format: "cjs", packages: "external" });
-  type Message = { type: string; requestId: string; rows?: Record<string, unknown>[]; chunkId?: number; success?: boolean; result?: ExcelParseResult };
+  type Message = { type: string; requestId: string; rows?: Record<string, unknown>[]; keys?: string[]; chunkId?: number; success?: boolean; result?: ExcelParseResult };
   const messages: Message[] = [];
   const scope = { onmessage: (event: { data: unknown }) => { void event; }, postMessage: (message: Message) => messages.push(structuredClone(message)) };
   const module = { exports: {} };
   new Function("require", "module", "exports", "self", result.outputFiles[0].text)(createRequire(import.meta.url), module, module.exports, scope);
   const fileName = "North.MKT Roster.csv";
-  const csv = "\uFEFFCenter,ID,Name,Date,Code,Class,From,To,Duration,Notes,Hour,Total\r\n" + Array.from({ length: 2_505 }, (_, i) =>
-    `MKT LOCAL NORTH,${String(i + 1).padStart(12, "0")},Tên thử,Mon 2026-9-21,LPAR01,Vu Tong Phan,08:00,12:00,4:00,"Họp, ghi chú ""North""\r\nDòng 2",4.00,"80,000"`).join("\r\n");
+  const csv = "\uFEFFCenter,ID,Name,Date,Code,Class,From,To,Duration,Notes,Hour,Total,Total\r\n" + Array.from({ length: 2_505 }, (_, i) =>
+    `MKT LOCAL NORTH,${String(i + 1).padStart(12, "0")},Tên thử,Mon 2026-9-21,LPAR01,Vu Tong Phan,08:00,12:00,4:00,"Họp, ghi chú ""North""\r\nDòng 2",4.00,"80,000",80000`).join("\r\n");
   const fileBuffer = new TextEncoder().encode(csv).buffer;
   scope.onmessage({ data: { requestId: "parse", fileName, fileBuffer,
-    fileId: "source", mode: "roster", resultBackpressure: true } });
+    fileId: "source", mode: "roster", resultBackpressure: true, rosterCsvStreaming: true } });
   assert.equal(messages.length, 2);
   assert.equal(messages.shift()!.type, "excel-result-start");
   const first = messages[0];
@@ -213,7 +214,8 @@ test("Excel producer waits for each acknowledgement and delivers every row in bo
   while (messages.length) {
     const message = messages.shift()!;
     if (message.type === "excel-result-chunk") {
-      assert.ok(message.rows!.length <= 1_000);
+      assert.ok(message.rows!.length <= 500);
+      assert.equal(message.keys!.length, message.rows!.length);
       received.push(...message.rows!);
       assert.equal(messages.length, 0);
       scope.onmessage({ data: { type: "excel-result-ack", requestId: "parse", chunkId: message.chunkId } });
@@ -225,12 +227,23 @@ test("Excel producer waits for each acknowledgement and delivers every row in bo
   assert.ok(received.every(row => row._rowId === "source"));
   assert.equal(received[0].ma_nv, "000000000001");
   assert.equal(received[0].Notes, 'Họp, ghi chú "North"\nDòng 2');
+  assert.equal(received[0].Total_1, "80000");
   assert.deepEqual(received, prepareExcelResult(parseExcelData(fileBuffer, fileName), fileName, "source", "roster").rows);
 
   const semicolon = "sep=;\r\nCenter;ID;Name;Date\r\nHN0027.OPK;00123;Test Person;15/09/2026";
   scope.onmessage({ data: { requestId: "legacy-csv", fileName: "roster.csv", fileId: "source",
     fileBuffer: new TextEncoder().encode(semicolon).buffer, mode: "roster" } });
   assert.equal(messages.shift()?.result?.rows[0]?.ma_nv, "00123");
+
+  const repeated = "Center,ID,Name,Date,Total,Total\nHN0027.OPK,00123,Old,15/09/2026,80,80\nHN0027.OPK,00123,New,15/09/2026,80,80";
+  scope.onmessage({ data: { requestId: "old-tab", fileName: "roster.csv", fileId: "source",
+    fileBuffer: new TextEncoder().encode(repeated).buffer, mode: "roster", resultBackpressure: true } });
+  assert.equal(messages.shift()?.type, "excel-result-start");
+  const oldTabChunk = messages.shift()!;
+  assert.equal(oldTabChunk.keys, undefined, "open tabs retain their original message format");
+  assert.deepEqual(oldTabChunk.rows?.map(row => row.full_name), ["New"]);
+  scope.onmessage({ data: { type: "excel-result-ack", requestId: "old-tab", chunkId: oldTabChunk.chunkId } });
+  assert.equal(messages.shift()?.type, "excel-result-complete");
 });
 
 test("Settings calculates identical payroll totals without returning unused detailed roster rows", () => {
@@ -247,6 +260,34 @@ test("Settings calculates identical payroll totals without returning unused deta
   assert.deepEqual(settings.centerSummary, detailed.centerSummary);
   assert.equal(settings.employeeSummary[0].totalSalary, detailed.employeeSummary[0].totalSalary);
   assert.equal(settings.centerSummary[0].chargeMktLocal, 80_000);
+});
+
+test("Settings preserves aggregation across connected overlaps and adjacent shifts", () => {
+  const rosterData = [["09:00", "11:00"], ["10:00", "12:00"], ["11:00", "13:00"], ["13:00", "14:00"]]
+    .map(([FROM, TO], index) => ({ _uuid: `overlap-${index}`, _rowId: "mkt", _sourceFile: "North.MKT Roster.xlsx",
+      center: "MKT LOCAL NORTH", Class: "Vu Tong Phan", "ID NUMBER": "00123", "FULL NAME": "TEST PERSON",
+      DATE: "15/09/2026", TYPE: "LPAR01", FROM, TO, Notes: `Shift ${index}` }));
+  const params = { rosterData, appData: { Timesheet_InputList: [{ id: "mkt", l07: "MKT LOCAL NORTH" }] },
+    preferredYear: 2026, checkTAsMap: {}, classSizeMap: {}, TASK_COLUMNS: [] };
+  const details = calculateTimesheet(params);
+  const summary = calculateTimesheet({ ...params, includeProcessedRosterData: false });
+  assert.equal(details.error, undefined);
+  assert.equal(summary.error, undefined);
+  assert.deepEqual(details.processedRosterData.map(row => row.overlap_total || 0), [3, 3, 3, 0]);
+  assert.deepEqual(details.processedRosterData.map(row => row.overlap_with_ids?.length || 0), [1, 2, 1, 0]);
+  assert.deepEqual(summary.processedRosterData, []);
+  const employee = (row: Record<string, unknown>) => ({ ...row, id: undefined });
+  assert.deepEqual(summary.employeeSummary.map(employee), details.employeeSummary.map(employee));
+  assert.equal(summary.employeeSummary[0].totalSalary, 140000);
+
+  const dense = Array.from({length: 36}, (_, index) => ({
+    ...rosterData[0], _uuid: `dense-${index}`, Class: `TEST-${index}`,
+  }));
+  const denseDetails = calculateTimesheet({ ...params, rosterData: dense });
+  assert.equal(denseDetails.error, undefined);
+  assert.equal(denseDetails.processedRosterData.length, 36);
+  assert.ok(denseDetails.processedRosterData.every(row => row.overlap_total === 36 && row.overlap_with_ids.length === 30));
+  assert.match(denseDetails.processedRosterData[0].overlap_check, /và 5 ca khác$/);
 });
 
 test("the Timesheet worker waits for each chunk acknowledgement and returns every row and total", async () => {

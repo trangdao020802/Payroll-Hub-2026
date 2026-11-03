@@ -6,6 +6,7 @@ import { mapL07 } from '../lib/utils/center-utils';
 import {
   createStableTimesheetRowId,
   dedupeTimesheetRosterRows,
+  getTimesheetRosterBusinessKey,
 } from "../lib/utils/timesheet-roster-utils";
 
 export type ExcelDataKind = "roster" | "salary" | "staff" | "cache" | "raw";
@@ -23,6 +24,7 @@ interface ExcelWorkerRequest {
   fileId?: string;
   mode?: ExcelParseMode;
   resultBackpressure?: boolean;
+  rosterCsvStreaming?: boolean;
 }
 
 function findHeaderRow(rows: any[][]) {
@@ -305,41 +307,74 @@ function finishRosterRows(mappedRows: Record<string, unknown>[], sourceId: strin
   return { kind: "roster", rows };
 }
 
-function parseRosterCsv(fileBuffer: ArrayBuffer, fileName: string, fileId?: string): ExcelParseResult | null {
+// Split only between CSV records. Quoted commas, CRLF and multiline notes
+// stay intact for the same CSV parser used by the small-file path.
+function* csvRows(text: string): Generator<string[]> {
+  let start = 0;
+  let recordCount = 0;
+  let quoted = false;
+  let fieldStart = true;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (quoted) {
+      if (char === '"') {
+        if (text[index + 1] === '"') index++;
+        else quoted = false;
+      }
+    } else if (char === '"' && fieldStart) {
+      quoted = true;
+      fieldStart = false;
+    } else if (char === '\r' || char === '\n') {
+      if (char === '\r' && text[index + 1] === '\n') index++;
+      fieldStart = true;
+      if (++recordCount === 500) {
+        yield* csvParseRows(text.slice(start, index + 1), row => row);
+        start = index + 1;
+        recordCount = 0;
+      }
+    } else {
+      fieldStart = char === ',';
+    }
+  }
+  if (start < text.length) yield* csvParseRows(text.slice(start), row => row);
+}
+
+function csvHeaders(cells: string[]): string[] {
+  const used = new Set<string>();
+  return cells.map(name => {
+    if (!name || name.toLowerCase().includes("__empty")) return "";
+    let key = name;
+    for (let suffix = 1; used.has(key); suffix++) key = `${name}_${suffix}`;
+    used.add(key);
+    return key;
+  });
+}
+
+function* parseRosterCsv(fileBuffer: ArrayBuffer, fileName: string, fileId?: string): Generator<Record<string, unknown>> {
   const csv = new TextDecoder("utf-8").decode(fileBuffer);
-  if (/^sep=[^,]/i.test(csv)) return null;
-  const mappedRows: Record<string, unknown>[] = [];
+  if (/^sep=[^,]/i.test(csv)) return;
   let headers: string[] | undefined;
   let previewRemaining = 50;
 
-  // Google Sheets exports comma-delimited text. Mapping each row as it is
-  // read avoids an expanded workbook and a second array of raw records.
-  csvParseRows(csv, (cells) => {
+  for (const cells of csvRows(csv)) {
     if (!headers) {
-      if (!previewRemaining || !cells.some(cell => cell.trim())) return null;
-      previewRemaining--;
-      if (findHeaderRow([cells]) !== 0) return null;
-      previewRemaining = 0;
-      const keys = cells.map(key => key.toLowerCase().includes("__empty") ? "" : key);
-      const names = keys.filter(Boolean);
-      // Let SheetJS handle ambiguous headers and other delimiter formats.
-      if (names.length >= 2 && new Set(names).size === names.length && !names.includes("__proto__")) {
-        headers = keys;
+      if (!cells.some(cell => cell.trim())) continue;
+      if (findHeaderRow([cells]) === 0) {
+        const keys = csvHeaders(cells);
+        if (keys.filter(Boolean).length >= 2) headers = keys;
       }
-      return null;
+      if (!headers && --previewRemaining === 0) return;
+      continue;
     }
 
-    const row: Record<string, unknown> = {};
+    const row: Record<string, unknown> = Object.create(null);
     for (let index = 0; index < Math.min(cells.length, headers.length); index++) {
       const key = headers[index];
       const value = cells[index];
       if (key && value.trim()) row[key] = value.replace(/\r\n/g, "\n");
     }
-    if (Object.keys(row).length) mappedRows.push(mapExcelRosterRow(row, fileName, fileId));
-    return null;
-  });
-
-  return mappedRows.length ? finishRosterRows(mappedRows, fileId || fileName) : null;
+    if (Object.keys(row).length) yield mapExcelRosterRow(row, fileName, fileId);
+  }
 }
 
 export function prepareExcelResult(
@@ -368,21 +403,55 @@ export function prepareExcelResult(
 }
 
 if (typeof window === "undefined" && typeof self !== "undefined") {
-  const outputs = new Map<string, { result: ExcelParseResult; offset: number; chunkId: number }>();
+  type Chunk = { rows: ExcelParseResult['rows']; keys?: string[] };
+  const outputs = new Map<string, { chunks: Iterator<Chunk>; chunkId: number }>();
+
+  function* resultChunks(rows: ExcelParseResult['rows']): Generator<Chunk> {
+    for (let offset = 0; offset < rows.length; offset += 1000) {
+      const end = Math.min(offset + 1000, rows.length);
+      const batch = rows.slice(offset, end);
+      for (let index = offset; index < end; index++) delete rows[index];
+      yield { rows: batch };
+    }
+  }
+
+  function* csvChunks(rows: Iterable<Record<string, unknown>>, sourceId: string): Generator<Chunk> {
+    let chunk: Required<Chunk> = { rows: [], keys: [] };
+    for (const row of rows) {
+      row._uuid = createStableTimesheetRowId(row, sourceId);
+      chunk.keys.push(getTimesheetRosterBusinessKey(row));
+      chunk.rows.push(row);
+      if (chunk.rows.length === 500) {
+        yield chunk;
+        chunk = { rows: [], keys: [] };
+      }
+    }
+    if (chunk.rows.length) yield chunk;
+  }
+
+  const fail = (requestId: string, error: unknown) => {
+    outputs.delete(requestId);
+    self.postMessage({ requestId, success: false, error: error instanceof Error ? error.message : String(error) });
+  };
   const sendNext = (requestId: string) => {
     const output = outputs.get(requestId);
     if (!output) return;
-    if (output.offset >= output.result.rows.length) {
-      outputs.delete(requestId);
-      self.postMessage({ type: "excel-result-complete", requestId, success: true });
-      return;
+    try {
+      const chunk = output.chunks.next();
+      if (chunk.done) {
+        outputs.delete(requestId);
+        self.postMessage({ type: "excel-result-complete", requestId, success: true });
+      } else {
+        self.postMessage({ type: "excel-result-chunk", requestId, chunkId: ++output.chunkId, ...chunk.value });
+      }
+    } catch (error) {
+      fail(requestId, error);
     }
-    const end = Math.min(output.offset + 1_000, output.result.rows.length);
-    self.postMessage({ type: "excel-result-chunk", requestId,
-      chunkId: ++output.chunkId, rows: output.result.rows.slice(output.offset, end) });
-    // postMessage owns a clone now; release the worker's transmitted rows.
-    for (let index = output.offset; index < end; index++) delete output.result.rows[index];
-    output.offset = end;
+  };
+  const startOutput = (requestId: string, kind: ExcelDataKind, chunks: Iterator<Chunk>) => {
+    outputs.set(requestId, { chunks, chunkId: 0 });
+    self.postMessage({ type: "excel-result-start", requestId, kind });
+    sendNext(requestId);
   };
   self.onmessage = (event: MessageEvent<ExcelWorkerRequest & { type?: string; chunkId?: number }>) => {
     if (event.data.type === "excel-result-ack") {
@@ -398,23 +467,28 @@ if (typeof window === "undefined" && typeof self !== "undefined") {
       mode = "auto",
     } = event.data;
     try {
-      const csvRoster = mode === "roster" && fileName?.toLowerCase().endsWith(".csv")
-        ? parseRosterCsv(fileBuffer, fileName, fileId)
-        : null;
-      const result = csvRoster ?? prepareExcelResult(parseExcelData(fileBuffer, fileName), fileName, fileId, mode);
+      let result: ExcelParseResult | undefined;
+      if (mode === "roster" && /\.(csv|txt|gsheet)$/i.test(fileName)) {
+        const rest = parseRosterCsv(fileBuffer, fileName, fileId);
+        const first = rest.next();
+        if (!first.done) {
+          const sourceId = fileId || fileName;
+          if (event.data.resultBackpressure && event.data.rosterCsvStreaming) {
+            function* allRows() { yield first.value; yield* rest; }
+            startOutput(requestId, "roster", csvChunks(allRows(), sourceId));
+            return;
+          }
+          result = finishRosterRows([first.value, ...rest], sourceId);
+        }
+      }
+      result ??= prepareExcelResult(parseExcelData(fileBuffer, fileName), fileName, fileId, mode);
       if (event.data.resultBackpressure) {
-        outputs.set(requestId, { result, offset: 0, chunkId: 0 });
-        self.postMessage({ type: "excel-result-start", requestId, kind: result.kind });
-        sendNext(requestId);
+        startOutput(requestId, result.kind, resultChunks(result.rows));
       } else {
         self.postMessage({ requestId, success: true, result });
       }
-    } catch (error: any) {
-      self.postMessage({
-        requestId,
-        success: false,
-        error: error?.message || String(error),
-      });
+    } catch (error) {
+      fail(requestId, error);
     }
   };
 }

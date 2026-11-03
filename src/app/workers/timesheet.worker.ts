@@ -22,8 +22,11 @@ import {
   ACADEMIC_FIELDS,
 } from "../constants/timesheet-logic";
 
+const MAX_OVERLAP_PREVIEW_ROWS = 30;
+
 export function calculateTimesheet(params: any) {
   try {
+    const includeDetails = params.includeProcessedRosterData !== false;
     const {
       rosterData,
       salaryScaleData,
@@ -403,11 +406,11 @@ export function calculateTimesheet(params: any) {
       detailRow.center = "Ecopark";
       detailRow.chargeToCenterMkt = "HY0001.ECP";
     }
-    const normalizeSearchStr = (s: string) => s ? s.toLowerCase().replace(/đ/g, "d").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, "") : "";
-    (detailRow as any)._searchStr = normalizeSearchStr(
-      `${detailRow.business} ${detailRow.l07} ${detailRow.center} ${detailRow.classCode} ` +
-      `${detailRow.fullName} ${detailRow.employeeId} ${detailRow.date} ${detailRow.taskType} ${detailRow.notes}`,
-    );
+    if (includeDetails) {
+      const search = `${detailRow.business} ${detailRow.l07} ${detailRow.center} ${detailRow.classCode} ` +
+        `${detailRow.fullName} ${detailRow.employeeId} ${detailRow.date} ${detailRow.taskType} ${detailRow.notes}`;
+      (detailRow as any)._searchStr = search.toLowerCase().replace(/đ/g, "d").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, "");
+    }
     details.push(detailRow);
   });
 
@@ -573,57 +576,70 @@ export function calculateTimesheet(params: any) {
   let overlapGroupSequence = 0;
   Object.values(groups).forEach(group => {
     if (group.length <= 1) return;
-    const neighbours = new Map<any, any[]>();
-    group.forEach((row) => neighbours.set(row, []));
+    const windows = group.map(row => {
+      const start = timeToMinutes(row.gio_vao);
+      const end = timeToMinutes(row.gio_ra);
+      return { start, end: end < start ? end + 24 * 60 : end };
+    });
+    const overlaps = (i: number, j: number) => group[i].id !== group[j].id &&
+      group[i].ma_nv === group[j].ma_nv && group[i].ngay === group[j].ngay &&
+      windows[i].start < windows[j].end && windows[j].start < windows[i].end;
+    // Traverse the same connected groups in source order, without retaining a
+    // second copy of every overlapping pair in memory.
+    const visited = new Uint8Array(group.length);
+    group.forEach((_row, startIndex) => {
+      if (visited[startIndex]) return;
 
-    for (let i = 0; i < group.length; i++) {
-      for (let j = i + 1; j < group.length; j++) {
-        const left = group[i];
-        const right = group[j];
-        if (!checkShiftOverlap(left, right)) continue;
-        neighbours.get(left)!.push(right);
-        neighbours.get(right)!.push(left);
-      }
-    }
-
-    const visited = new Set<any>();
-    group.forEach((startRow) => {
-      if (visited.has(startRow) || neighbours.get(startRow)!.length === 0) return;
-
-      const component: any[] = [];
-      const stack = [startRow];
-      visited.add(startRow);
+      const component: number[] = [];
+      const stack = [startIndex];
+      visited[startIndex] = 1;
+      const visit = (index: number) => {
+        if (visited[index]) return;
+        visited[index] = 1;
+        stack.push(index);
+      };
       while (stack.length > 0) {
-        const row = stack.pop()!;
-        component.push(row);
-        neighbours.get(row)!.forEach((nextRow) => {
-          if (visited.has(nextRow)) return;
-          visited.add(nextRow);
-          stack.push(nextRow);
-        });
+        const index = stack.pop()!;
+        component.push(index);
+        for (let other = 0; other < group.length; other++) {
+          if (!visited[other] && overlaps(index, other)) visit(other);
+        }
       }
 
+      if (component.length < 2) return;
       component.sort((left, right) => {
-        const timeDifference = timeToMinutes(left.gio_vao) - timeToMinutes(right.gio_vao);
-        return timeDifference || String(left.class || "").localeCompare(String(right.class || ""), "vi");
+        const timeDifference = windows[left].start - windows[right].start;
+        return timeDifference || String(group[left].class || "").localeCompare(String(group[right].class || ""), "vi");
       });
       const groupCode = `TL-${String(++overlapGroupSequence).padStart(3, "0")}`;
 
-      component.forEach((row, index) => {
-        const overlappingRows = neighbours.get(row)!;
-        const overlapDetails = overlappingRows.map((other) => {
+      component.forEach((rowIndex, index) => {
+        const row = group[rowIndex];
+        row.overlap_group = groupCode;
+        row.overlap_position = index + 1;
+        row.overlap_total = component.length;
+        if (!includeDetails) return;
+        const overlapDetails: string[] = [];
+        const overlapIds: string[] = [];
+        let overlapCount = 0;
+        for (let otherIndex = 0; otherIndex < group.length; otherIndex++) {
+          if (!overlaps(rowIndex, otherIndex)) continue;
+          overlapCount++;
+          // Keep the full count but bound the preview for abnormal sources
+          // with hundreds of overlapping shifts for one person and date.
+          if (overlapDetails.length >= MAX_OVERLAP_PREVIEW_ROWS) continue;
+          const other = group[otherIndex];
           const classVal = String(other.class || "").trim();
           const isNAClass =
             !classVal ||
             ["NA", "N/A", "NAN", "NULL", "NONE", "KHÔNG CÓ LỚP HỌC", "KHÔNG CÓ LỚP"].includes(classVal.toUpperCase());
           const classTag = isNAClass ? "" : ` (Lớp ${classVal})`;
-          return `Ca ${other.gio_vao}-${other.gio_ra}${classTag}`;
-        });
-        row.overlap_check = `Trùng lịch: ${overlapDetails.join(", ")}`;
-        row.overlap_group = groupCode;
-        row.overlap_position = index + 1;
-        row.overlap_total = component.length;
-        row.overlap_with_ids = overlappingRows.map((other) => other.id);
+          overlapDetails.push(`Ca ${other.gio_vao}-${other.gio_ra}${classTag}`);
+          overlapIds.push(other.id);
+        }
+        const additional = overlapCount - overlapDetails.length;
+        row.overlap_check = `Trùng lịch: ${overlapDetails.join(", ")}${additional ? ` và ${additional} ca khác` : ""}`;
+        row.overlap_with_ids = overlapIds;
       });
     });
   });
@@ -838,7 +854,7 @@ export function calculateTimesheet(params: any) {
   });
   const cenResult = Object.values(cenAggregate);
 
-  return { processedRosterData: params.includeProcessedRosterData === false ? [] : details,
+  return { processedRosterData: includeDetails ? details : [],
     employeeSummary: empResult, centerSummary: cenResult, isCalculating: false };
 
   } catch (error: any) {

@@ -2,10 +2,20 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "routes": [
     {
+      "src": "/workers/(excelParser|timesheet)\\.worker-v1\\.js",
+      "headers": { "Cache-Control": "public, max-age=0, must-revalidate" },
+      "continue": true
+    },
+    {
       "handle": "filesystem"
     },
     {
-      "src": "/assets/.*",
+      "src": "/assets/(excelParser|timesheet)\\.worker-(BQoK_7A7|VL5VsIBN|DnjA2kAa|B4NW1FzC)\\.js",
+      "dest": "/workers/$1.worker-v1.js",
+      "headers": { "Cache-Control": "public, max-age=0, must-revalidate" }
+    },
+    {
+      "src": "/(assets|workers)/.*",
       "status": 404
     },
     {
