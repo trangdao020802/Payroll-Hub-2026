@@ -38,6 +38,7 @@ export function clearMasterPageData(previous: AppData): AppData {
     HoldCarrySnapshots: {},
     CustomReport: emptyTable(previous.CustomReport),
     Master_Roster: [],
+    PivotMasterClearedMonths: [],
     Master_RosterFileName: "",
     updatedAt: new Date().toISOString(),
   };
@@ -111,6 +112,7 @@ export function createClearedWebData(previous: AppData): AppData {
     Timesheet_RosterFileName: "",
     Timesheet_RosterEditHistory: [],
     Master_Roster: [],
+    PivotMasterClearedMonths: [],
     Master_RosterFileName: "",
     Q_Staff: [],
     Q_Salary_Scale: [],

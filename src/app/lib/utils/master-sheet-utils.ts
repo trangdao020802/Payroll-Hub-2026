@@ -28,6 +28,12 @@ export function isRosterMasterSheetName(sheetName: unknown): boolean {
   return normalizeMasterSheetName(sheetName).includes("ROSTER");
 }
 
+export function findMasterRosterSheetName(sheetNames: readonly string[]): string | undefined {
+  return sheetNames.find(name => normalizeMasterSheetName(name) === "ROSTER")
+    ?? sheetNames.find(name => /^Q[ _-]+ROSTER$/.test(normalizeMasterSheetName(name)))
+    ?? sheetNames.find(isRosterMasterSheetName);
+}
+
 export function isBankMasterSheetName(sheetName: unknown): boolean {
   return isNormalizedBankSheetName(normalizeMasterSheetName(sheetName));
 }

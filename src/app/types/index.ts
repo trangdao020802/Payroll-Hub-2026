@@ -65,6 +65,8 @@ export interface AppData {
   Timesheet_Roster: any[];
   /** Master-owned MKT Local roster used only by Gross Pay/Pivot Master. */
   Master_Roster: any[];
+  /** Pivot-only month deletions survive rebuilds from the unchanged Master sources. */
+  PivotMasterClearedMonths?: string[];
   Q_Cache: any[];
   Q_BonusData?: any[];
   Q_BonusSheetName?: string;

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import * as XLSX from "xlsx";
+import { omitPivotMonths } from "../src/app/lib/utils/pivot-utils";
 import { INITIAL_APP_DATA } from "../src/app/constants/initial-data";
 import { processMasterAEData, type MasterAEProcessingContext } from "../src/app/lib/utils/master-ae-processing";
 import { parseMasterWorkbook } from "../src/app/workers/masterImport.worker";
@@ -272,4 +273,67 @@ test("Master import preserves historical Bank North months for Batch Payment", a
     bankRows.find((row) => row["Tháng báo cáo"] === "08.2026")?.["ID Number"],
     "001090627040",
   );
+});
+
+test("Pivot Master replaces a month's Roster by source, including renamed uploads and mirrored sheets", async (t) => {
+  const rosterFile = (name: string, hours?: number) => {
+    const workbook = XLSX.utils.book_new();
+    const header = ["ID Number", "Full name", "Center", "Charge to Center MKT", "Type", "Duration"];
+    const rows = hours === undefined ? [header] : [
+      header,
+      [anna, "Employee A", "MKT LOCAL NORTH", "Ocean Park", "LPAR01", hours],
+      [bao, "Employee B", "MKT LOCAL NORTH", "Ocean Park", "LPAR01", 1],
+    ];
+    // A query copy can appear first in a workbook exported by the source.
+    for (const name of ["Q_Roster", "Roster"]) {
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(rows), name);
+    }
+    return new File([XLSX.write(workbook, { bookType: "xlsx", type: "array" })], name);
+  };
+  const old = rosterFile("MKT LOCAL NORTH 08.2026.xlsx", 2);
+  const newer = rosterFile("MKT LOCAL NORTH 08.2026 revised.xlsx", 3);
+  const july = { _sourceFile: "MKT 07.2026.xlsx", month: "07.2026", l07: "HN0027.OPK", type: "LPAR01", durationHours: 4 };
+  const harness = importHarness(t, old);
+  const data = harness.data();
+  data.Ae_Global_Inputs[0].bank = "MKT LOCAL NORTH";
+  data.Master_Roster = [july];
+  const gross = { "ID Number": anna, L07: "HN0027.OPK", Business: "AHN", "Tháng báo cáo": "07.2026", "CHARGE TO LXO": 100000 };
+  data.Sheet1_AE.data = [gross];
+  const pivot = () => JSON.parse(harness.storage.get("pivot_master_processed_data") || "null").groupedData.AHN["HN0027.OPK"];
+  await processMasterAEData(harness.context);
+  assert.equal(pivot()["08.2026"].LPAR01, 60000);
+  assert.equal(pivot()["07.2026"].LXO, 100000);
+
+  const previous = harness.data();
+  harness.setData({
+    ...previous,
+    PivotMasterClearedMonths: ["2026-08", "07.2026"],
+    Ae_Global_Inputs: [
+      { id: "renamed-file", name: newer.name, fileObj: newer, status: "ready", month: "8/2026", bank: "MKT LOCAL NORTH" },
+      ...previous.Ae_Global_Inputs,
+    ],
+  });
+  await processMasterAEData(harness.context);
+  assert.equal(pivot()["08.2026"].LPAR01, 80000);
+  assert.equal(harness.data().Master_Roster.length, 3);
+  assert.deepEqual(harness.data().Master_Roster[0], july);
+  assert.deepEqual(harness.data().PivotMasterClearedMonths, ["07.2026"]);
+  assert.deepEqual(omitPivotMonths({ AHN: { "HN0027.OPK": pivot() } }, ["07.2026"]), {
+    AHN: { "HN0027.OPK": { "08.2026": { LPAR01: 80000 } } },
+  });
+
+  harness.setData(harness.data());
+  await processMasterAEData(harness.context);
+  assert.equal(pivot()["08.2026"].LPAR01, 80000, "reprocessing cannot select the older workbook again");
+
+  const empty = rosterFile("MKT LOCAL NORTH 08.2026 empty.xlsx");
+  const inputs = harness.data().Ae_Global_Inputs.map(row => row.id === "renamed-file"
+    ? { ...row, name: empty.name, fileObj: empty, status: "Uploaded" } : row);
+  harness.setData({ ...harness.data(), Ae_Global_Inputs: inputs });
+  await processMasterAEData(harness.context);
+  assert.equal(pivot()["08.2026"], undefined, "a valid empty Roster clears the previously imported MKT amount");
+  assert.deepEqual(harness.data().Master_Roster, [july]);
+  harness.setData(harness.data());
+  await processMasterAEData(harness.context);
+  assert.equal(pivot()["08.2026"], undefined);
 });

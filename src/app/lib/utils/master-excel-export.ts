@@ -22,7 +22,7 @@ import {
   prepareTransactionBankExportRows,
   type WorkbookExportDefinition,
 } from "./excel-export";
-import { buildPivotFromAppData, getPivotSourceLabels } from "./pivot-utils";
+import { buildPivotFromAppData, getPivotSourceLabels, omitPivotMonths } from "./pivot-utils";
 import {
   canonicalTransactionHeaders,
   withCanonicalTransactionDocumentId,
@@ -402,6 +402,7 @@ const buildPivotRows = (
   grossRows: DataRow[],
   rosterRows: DataRow[],
   reportingMonth: string,
+  clearedMonths: readonly string[],
 ) => {
   const result = buildPivotFromAppData(
     grossRows,
@@ -409,26 +410,27 @@ const buildPivotRows = (
     rosterRows,
     reportingMonth,
   );
+  const groupedData = omitPivotMonths(result.groupedData, clearedMonths);
   const typeColumns = result.typeColumns || [];
   const rows: DataRow[] = [];
   const grandTotals = Object.fromEntries(typeColumns.map((type) => [type, 0]));
   let grandTotal = 0;
   let rowNumber = 1;
 
-  Object.keys(result.groupedData || {})
+  Object.keys(groupedData)
     .sort()
     .forEach((business) => {
       const businessTotals = Object.fromEntries(
         typeColumns.map((type) => [type, 0]),
       );
       let businessTotal = 0;
-      Object.keys(result.groupedData[business] || {})
+      Object.keys(groupedData[business] || {})
         .sort()
         .forEach((l07) => {
-          Object.keys(result.groupedData[business][l07] || {})
+          Object.keys(groupedData[business][l07] || {})
             .sort()
             .forEach((month) => {
-              const bucket = result.groupedData[business][l07][month];
+              const bucket = groupedData[business][l07][month];
               const sourceLabels = getPivotSourceLabels(bucket);
               const row: DataRow = {
                 "No.": rowNumber,
@@ -527,6 +529,7 @@ export function createMasterExportDefinition(
       return source !== "MOCK_ROSTER.XLSX" && !id.startsWith("mock-row-");
     }),
     reportingMonth,
+    appData.PivotMasterClearedMonths || [],
   );
 
   const dateStamp = new Date().toISOString().slice(0, 10);

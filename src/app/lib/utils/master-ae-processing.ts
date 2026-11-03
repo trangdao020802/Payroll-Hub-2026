@@ -4,7 +4,7 @@ import type { AppData } from "../../types";
 import type { OriginalField } from "./table-originals";
 import type { MasterWorkbookPayload } from "../../workers/masterImport.worker";
 import {
-  applyPivotMktTypeCache, buildPivotFromAppData, getPivotDataMonths,
+  applyPivotMktTypeCache, buildPivotFromAppData, getMasterRosterMonth, normalizePivotMonth,
   readPivotMktTypeCache, PIVOT_CACHE_VERSION, updatePivotMktTypeCache,
   writePivotMktTypeCache,
 } from "./pivot-utils";
@@ -13,7 +13,7 @@ import {
   formatIdNumber, generateUUID,
 } from "./master-data-utils";
 import {
-  isBankMasterSheetName, isHoldMasterSheetName, isRosterMasterSheetName,
+  findMasterRosterSheetName, isBankMasterSheetName, isHoldMasterSheetName, isRosterMasterSheetName,
   isSheetOneMasterSheetName, normalizeMasterSheetName,
 } from "./master-sheet-utils";
 import { parsePayrollMonth } from "./hold-carryover";
@@ -247,6 +247,7 @@ export async function processMasterAEData(
       const rosterStart = rosterDataToAppend.length;
       let bankSheetRead = false;
       let holdSheetRead = false;
+      let rosterSheetRead = false;
 
       processedFiles++;
       setProgress(Math.round((processedFiles / totalFiles) * 100));
@@ -281,6 +282,9 @@ export async function processMasterAEData(
           throw new Error("File không có sheet nào.");
         }
 
+        const rosterSheetName = findMasterRosterSheetName(
+          parsedWorkbook.sheets.filter(sheet => sheet.rows.length > 0).map(sheet => sheet.sheetName),
+        );
         for (const parsedSheet of parsedWorkbook.sheets) {
           const { sheetName, rows } = parsedSheet;
           try {
@@ -293,9 +297,10 @@ export async function processMasterAEData(
             const isBankSheet = isBankMasterSheetName(sheetName);
             const isHoldSheet = isHoldMasterSheetName(sheetName);
             const isSheetOneSheet = isSheetOneMasterSheetName(sheetName);
-            if (rows.length === 1 && !isBankSheet && !isHoldSheet && !normalizedSheetName.includes("ADD")) continue;
+            if (rows.length === 1 && !isRosterSheet && !isBankSheet && !isHoldSheet && !normalizedSheetName.includes("ADD")) continue;
 
             if (isRosterSheet) {
+              if (sheetName !== rosterSheetName) continue;
               let headerRowIndex = -1;
               for (let r = 0; r < Math.min(30, rows.length); r++) {
                 const rowStr = rows[r]
@@ -324,8 +329,6 @@ export async function processMasterAEData(
                 headerRowIndex = 0;
               }
 
-              foundAnySheet = true;
-              sheetProcessed = true;
               const h = rows[headerRowIndex].map((c) => String(c || "").trim());
 
               const iCenter = getColIndex(h, "Center", {}, ["CENTER", "TRUNG TÂM", "MÃ AE", "AE CODE", "AE", "LOCATION"]);
@@ -339,6 +342,10 @@ export async function processMasterAEData(
               const iDuration = getColIndex(h, "Duration", {}, ["DURATION", "HOURS", "SỐ GIỜ", "GIỜ", "TK_DURATION", "TOTAL HOURS"]);
               const iNotes = getColIndex(h, "Notes", {}, ["NOTES", "NOTE", "GHI CHÚ", "REMARKS"]);
               const iChargeMkt = getColIndex(h, "Charge To Center MKT", {}, ["CHARGE TO CENTER MKT", "CHARGE TO CENTER", "CHARGETOCENTER"]);
+              if (iCenter === -1 && iChargeMkt === -1) continue;
+              foundAnySheet = true;
+              sheetProcessed = true;
+              rosterSheetRead = true;
 
               for (let r = headerRowIndex + 1; r < rows.length; r++) {
                 const row = rows[r];
@@ -1240,7 +1247,7 @@ export async function processMasterAEData(
           if (bankSheetRead && (bankData.length === bankStart || bankData.slice(bankStart).some(row => row["Bank Account Number"]))) bankSources.push(scope);
           if (holdSheetRead || holdData.length > holdStart) holdSources.push(scope);
           if (sheet1Data.length > grossStart) grossSources.push(scope);
-          if (rosterDataToAppend.length > rosterStart) rosterSources.push(scope);
+          if (rosterSheetRead) rosterSources.push(scope);
         } else {
           statusById.set(item.id, "Error: Invalid format");
         }
@@ -1455,6 +1462,37 @@ export async function processMasterAEData(
     const validHoldSources = holdSources.filter(source =>
       verifiedHoldData.some(row => matchesMasterSource(row, source)) || !finalHoldData.some(row => matchesMasterSource(row, source)));
 
+    const activeRosterSource = new Map<string, string>();
+    for (const input of appData.Ae_Global_Inputs) {
+      if (input.pivotRosterMonth) activeRosterSource.set(input.pivotRosterMonth, input.id);
+    }
+    const rosterSourceByMonth = new Map<string, MasterSourceScope>();
+    for (const source of rosterSources) {
+      const active = activeRosterSource.get(source.month);
+      // Reprocessing Settings can still include older workbooks. A new
+      // upload replaces the active source. A previously processed file can
+      // only refresh its own active month, including an empty snapshot.
+      if (!source.replacementRequested && active && active !== source.inputId) continue;
+      const prior = rosterSourceByMonth.get(source.month);
+      if (!prior?.replacementRequested || source.replacementRequested) {
+        rosterSourceByMonth.set(source.month, source);
+      }
+    }
+    const importedRoster = rosterDataToAppend.filter(row =>
+      rosterSourceByMonth.get(getMasterRosterMonth(row, ""))?.inputId === row._masterInputId,
+    );
+    const replaceRoster = (data: AppData) => [
+      ...(data.Master_Roster || []).filter(row =>
+        !rosterSourceByMonth.has(getMasterRosterMonth(row, data.globalMonth || "03.2026")),
+      ),
+      ...importedRoster,
+    ];
+    const refreshedPivotMonths = new Set(
+      [...grossSources, ...rosterSourceByMonth.values()]
+        .filter(source => source.replacementRequested)
+        .map(source => source.month),
+    );
+
     updateAppData((prev) => {
       const currentMonth = prev.globalMonth || "03.2026";
       const uploadTime = new Date().toISOString();
@@ -1541,14 +1579,21 @@ export async function processMasterAEData(
 
       const imported: AppData = {
         ...prev,
-        Ae_Global_Inputs: prev.Ae_Global_Inputs.map((row) => ({
-          ...row,
-          status: statusById.get(row.id) || row.status,
-        })),
-        Master_Roster: [
-          ...(prev.Master_Roster || []).filter(row => !rosterSources.some(source => matchesMasterSource(row, source))),
-          ...rosterDataToAppend
-        ],
+        Ae_Global_Inputs: prev.Ae_Global_Inputs.map((row) => {
+          const month = normalizePivotMonth(row.month || row.fileMonth || parseMonthFromFileName(row.name) || currentMonth);
+          const winningRoster = rosterSourceByMonth.get(month);
+          return {
+            ...row,
+            status: statusById.get(row.id) || row.status,
+            ...(winningRoster && {
+              pivotRosterMonth: winningRoster.inputId === row.id ? month : undefined,
+            }),
+          };
+        }),
+        Master_Roster: rosterSourceByMonth.size > 0 ? replaceRoster(prev) : prev.Master_Roster,
+        ...(prev.PivotMasterClearedMonths?.some(month => refreshedPivotMonths.has(normalizePivotMonth(month))) && {
+          PivotMasterClearedMonths: prev.PivotMasterClearedMonths.filter(month => !refreshedPivotMonths.has(normalizePivotMonth(month))),
+        }),
         Bank_North_AE: {
           headers: [
             "No",
@@ -1608,16 +1653,12 @@ export async function processMasterAEData(
 
     // Đồng bộ dữ liệu Pivot Master
     try {
-      const retainedRosterRows = (appData.Master_Roster || []).filter(
-        (row: any) =>
-          !rosterSources.some(source => matchesMasterSource(row, source)),
-      );
-      const rosterRowsForPivot = [
-        ...retainedRosterRows,
-        ...rosterDataToAppend,
-      ];
+      const rosterRowsForPivot = replaceRoster(appData);
       const basePivotResult = buildPivotFromAppData(
-        verifiedSheet1Data,
+        [
+          ...(appData.Sheet1_AE?.data || []).filter(row => !grossSources.some(source => matchesMasterSource(row, source))),
+          ...verifiedSheet1Data,
+        ],
         [],
         [],
         appData.globalMonth || "03.2026",
@@ -1654,12 +1695,15 @@ export async function processMasterAEData(
         cachedPivotGroupedData,
         cachedPivotTypeColumns,
       );
-      if (rosterRowsForPivot.length > 0) {
+      const monthsToUpdate = [...rosterSourceByMonth.values()]
+        .filter(source => source.replacementRequested || !mktTypeCache.manualMonths?.includes(source.month))
+        .map(source => source.month);
+      if (monthsToUpdate.length > 0) {
         mktTypeCache = updatePivotMktTypeCache(
           mktTypeCache,
           rosterPivotResult.groupedData || {},
           rosterPivotResult.typeColumns || [],
-          getPivotDataMonths(rosterPivotResult.groupedData || {}),
+          monthsToUpdate,
         );
         writePivotMktTypeCache(mktTypeCache);
       }

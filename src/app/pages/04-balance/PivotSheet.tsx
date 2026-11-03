@@ -1,4 +1,6 @@
 import { TableRestoreButton } from '../../components/TableRestoreButton';
+import { parsePayrollMonth } from "../../lib/utils/hold-carryover";
+import { findMasterRosterSheetName } from "../../lib/utils/master-sheet-utils";
 import { resolveMasterSpecialCenter } from "../../lib/utils/master-special-centers";
 import { registerTableExport } from "../../lib/utils/table-excel";
 import { chooseExcelExport } from "../../components/ExportScopeDialog";
@@ -38,6 +40,8 @@ import {
   getPivotDataMonths,
   getPivotSourceLabels,
   markPivotZhnSource,
+  normalizePivotMonth,
+  omitPivotMonths,
   readPivotMktTypeCache,
   PIVOT_CACHE_VERSION,
   updatePivotMktTypeCache,
@@ -374,12 +378,12 @@ function parseMonthFromFileName(fileName: string, globalMonth?: string): string 
 // ==========================================
 
 export function PivotSheet() {
-  const { appData, isLoading: isAppDataLoading } = useAppData();
+  const { appData, updateAppData, isLoading: isAppDataLoading } = useAppData();
   const [isProcessing, setIsProcessing] = useState(false);
   const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>(() => {
     try {
       const saved = localStorage.getItem("pivot_master_selected_month_filter");
-      if (saved) return saved;
+      if (saved) return normalizePivotMonth(saved);
     } catch {
       // ignore
     }
@@ -471,7 +475,10 @@ export function PivotSheet() {
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
 
   const safeTypeColumns = useMemo(() => (Array.isArray(typeColumns) ? typeColumns : []), [typeColumns]);
-  const safeGroupedData = useMemo(() => (groupedData && typeof groupedData === "object" ? groupedData : {}), [groupedData]);
+  const safeGroupedData = useMemo(() => omitPivotMonths(
+    groupedData && typeof groupedData === "object" ? groupedData : {},
+    appData.PivotMasterClearedMonths || [],
+  ), [groupedData, appData.PivotMasterClearedMonths]);
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
     try {
@@ -698,6 +705,36 @@ export function PivotSheet() {
     setDeleteRowTarget(null);
   };
   
+  const [deleteMonthTarget, setDeleteMonthTarget] = useState<string | null>(null);
+
+  const restorePivotMonths = useCallback((months: readonly string[]) => {
+    const reopened = new Set(months.map(normalizePivotMonth));
+    updateAppData(previous => {
+      const cleared = previous.PivotMasterClearedMonths || [];
+      const remaining = cleared.filter(month => !reopened.has(normalizePivotMonth(month)));
+      return remaining.length === cleared.length ? previous : { ...previous, PivotMasterClearedMonths: remaining };
+    }, false, true);
+  }, [updateAppData]);
+
+  const confirmDeleteMonth = () => {
+    if (!deleteMonthTarget || isProcessing || isAppDataLoading) return;
+    const month = deleteMonthTarget;
+    updateAppData(previous => ({
+      ...previous,
+      PivotMasterClearedMonths: [...new Set([...(previous.PivotMasterClearedMonths || []).map(normalizePivotMonth), month])],
+    }), false, true);
+    const remaining = omitPivotMonths(groupedData, [month]);
+    writePivotMktTypeCache(updatePivotMktTypeCache(
+      readPivotMktTypeCache(groupedData, safeTypeColumns), {}, [], [month],
+    ));
+    saveToCache(remaining);
+    setGroupedData(remaining);
+    setEditingCell(null);
+    setCurrentPage(1);
+    setDeleteMonthTarget(null);
+    toast.success(`Đã xóa dữ liệu Pivot Master tháng ${month}.`);
+  };
+
   const settingsMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -769,7 +806,8 @@ export function PivotSheet() {
     let processedMktFiles = 0;
     const newLogs: any[] = [];
 
-    for (const item of fileList) {
+    // Within one month the last valid MKT workbook replaces earlier versions.
+    for (const item of [...fileList].reverse()) {
       try {
         const displayBankName = extractBankName(item.name, item.bank);
         let processType = (displayBankName === 'MKT LOCAL') ? "MKT LOCAL NORTH" : "NORTH";
@@ -777,8 +815,8 @@ export function PivotSheet() {
         const workbook = XLSX.read(item.buffer, { type: "array" });
         let targetSheetName = "";
 
-        const rosterSheet = workbook.SheetNames.find(n => 
-          n.toUpperCase().includes('ROSTER') || n.toUpperCase().includes('Q_ROSTER')
+        const rosterSheet = findMasterRosterSheetName(
+          workbook.SheetNames.filter(name => workbook.Sheets[name]?.["!ref"]),
         );
 
         if (processType === "MKT LOCAL NORTH" || rosterSheet) {
@@ -798,7 +836,7 @@ export function PivotSheet() {
         if (!worksheet) continue;
 
         const jsonData = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1 });
-        if (jsonData.length <= 1) continue;
+        if (jsonData.length === 0 || (processType === "NORTH" && jsonData.length === 1)) continue;
 
         let headerRowIdx = 0;
         for (let r = 0; r < Math.min(15, jsonData.length); r++) {
@@ -896,6 +934,7 @@ export function PivotSheet() {
             });
           }
         } else if (processType === "MKT LOCAL NORTH") {
+          if (mktMonths.has(item.month)) continue;
           const centerColIdx = headers.findIndex((h: any) => {
             if (!h) return false;
             const val = String(h).trim().toUpperCase();
@@ -912,6 +951,10 @@ export function PivotSheet() {
               val === 'CƠ SỞ'
             );
           });
+          const allocationColIdx = headers.findIndex((header: unknown) =>
+            /^CHARGE\s*TO\s*CENTER/i.test(String(header || "").trim()),
+          );
+          const classColIdx = headers.findIndex((header: unknown) => String(header || "").trim().toUpperCase() === "CLASS");
           const typeColIdx = headers.findIndex((h: any) => {
             if (!h) return false;
             const val = String(h).trim().toUpperCase();
@@ -944,7 +987,12 @@ export function PivotSheet() {
             );
           });
 
-          if (centerColIdx === -1) continue;
+          const totalColIdx = headers.findIndex((h: unknown) => {
+            const label = String(h || "").trim().toUpperCase();
+            return label.includes("TOTAL") || label.includes("THỰC NHẬN") ||
+              label.includes("LƯƠNG") || label.includes("SỐ TIỀN");
+          });
+          if (centerColIdx === -1 || (durationColIdx === -1 && totalColIdx === -1)) continue;
           processedMktFiles += 1;
           mktMonths.add(item.month);
 
@@ -952,7 +1000,11 @@ export function PivotSheet() {
             const row = jsonData[i];
             if (!row || row.length === 0) continue;
 
-            const rawCenter = row[centerColIdx];
+            const sourceCenter = row[centerColIdx];
+            const resolvedSource = resolveMktRosterCenter(String(sourceCenter || "")).l07;
+            const rawCenter = row[allocationColIdx] ||
+              (resolvedSource === "MKT LOCAL NORTH" && row[classColIdx]) ||
+              sourceCenter;
             if (!rawCenter) continue;
 
             const mapped = processTimesheetMktLogic({ chargetocenterCode: String(rawCenter) });
@@ -967,15 +1019,8 @@ export function PivotSheet() {
             }
             let calculatedSalary = durationHours * 20000;
 
-            if (calculatedSalary === 0) {
-              const totalColIdx = headers.findIndex((h: any) => {
-                if (!h) return false;
-                const v = String(h).trim().toUpperCase();
-                return v.includes('TOTAL') || v.includes('THỰC NHẬN') || v.includes('LƯƠNG') || v.includes('SỐ TIỀN');
-              });
-              if (totalColIdx !== -1 && row[totalColIdx]) {
-                calculatedSalary = parseExcelMoney(row[totalColIdx]);
-              }
+            if (calculatedSalary === 0 && totalColIdx !== -1) {
+              calculatedSalary = parseExcelMoney(row[totalColIdx]);
             }
 
             if (calculatedSalary === 0) continue;
@@ -1120,7 +1165,9 @@ export function PivotSheet() {
             mktTypeCache,
             rosterResult.groupedData || {},
             rosterResult.typeColumns || [],
-            getPivotDataMonths(rosterResult.groupedData || {}),
+            getPivotDataMonths(rosterResult.groupedData || {}).filter(month =>
+              restoreOriginal || !mktTypeCache.manualMonths?.includes(month),
+            ),
           );
           writePivotMktTypeCache(mktTypeCache);
         }
@@ -1156,6 +1203,7 @@ export function PivotSheet() {
         }
 
         if (showToastMsg) {
+          if (getPivotDataMonths(restoredGroupedData).includes(selectedMonthFilter)) restorePivotMonths([selectedMonthFilter]);
           toast.success(
             `Đã đồng bộ Pivot Master từ dữ liệu đã xử lý trong bảng Master`,
           );
@@ -1177,12 +1225,12 @@ export function PivotSheet() {
         if (row.fileObj && row.fileObj instanceof File) {
           try {
             const buffer = await row.fileObj.arrayBuffer();
-            fileBuffers.push({ name: row.fileName || row.fileObj.name, bank: row.bank, buffer, month: rowMonth });
+            fileBuffers.push({ name: row.fileName || row.fileObj.name, bank: row.bank, buffer, month: normalizePivotMonth(rowMonth) });
           } catch (fileErr) {
             console.warn(`Không thể đọc file buffer cho file ${row.fileName || row.name}:`, fileErr);
           }
         } else if (row.buffer && row.buffer instanceof ArrayBuffer) {
-          fileBuffers.push({ name: row.fileName || row.name, bank: row.bank, buffer: row.buffer, month: rowMonth });
+          fileBuffers.push({ name: row.fileName || row.name, bank: row.bank, buffer: row.buffer, month: normalizePivotMonth(rowMonth) });
         }
       }
 
@@ -1282,6 +1330,7 @@ export function PivotSheet() {
         }
 
         if (showToastMsg) {
+          if (getPivotDataMonths(restoredGroupedData).includes(selectedMonthFilter)) restorePivotMonths([selectedMonthFilter]);
           toast.success("Đã đồng bộ lại dữ liệu Pivot Master từ bảng Setting Master");
         }
       } else {
@@ -1306,6 +1355,7 @@ export function PivotSheet() {
     appData.Sheet1_AE?.data,
     appData.Master_Roster,
     processFileBuffers,
+    restorePivotMonths,
     selectedMonthFilter,
   ]);
 
@@ -1324,7 +1374,8 @@ export function PivotSheet() {
         const file = files[i];
         try {
           const buffer = await file.arrayBuffer();
-          const fileMonth = appData.globalMonth || parseMonthFromFileName(file.name, appData.globalMonth) || "06.2026";
+          const selectedMonth = selectedMonthFilter === "ALL" ? appData.globalMonth : selectedMonthFilter;
+          const fileMonth = normalizePivotMonth(parsePayrollMonth(file.name)?.dot || selectedMonth || "06.2026");
           fileBuffers.push({ name: file.name, buffer, month: fileMonth });
         } catch (fErr) {
           console.warn(`Lỗi khi đọc file ${file.name}:`, fErr);
@@ -1347,15 +1398,17 @@ export function PivotSheet() {
         currentMktTypeCache,
         res?.mktGroupedData || {},
         res?.mktTypeColumns || [],
-        res?.mktMonths || [],
+        res.mktMonths,
+        true,
       );
       writePivotMktTypeCache(nextMktTypeCache);
 
       // Áp dụng snapshot TYPE bằng phép thay thế có chọn lọc. Các cột không
       // thuộc MKT Local North không bị xóa, cộng thêm hay thay đổi giá trị.
       const mergedGroupedData = applyPivotMktTypeCache(
-        safeGroupedData,
+        groupedData,
         nextMktTypeCache,
+        res.mktMonths,
       );
       const mergedTypeColumns = mergePivotTypeColumns(
         safeTypeColumns,
@@ -1383,6 +1436,7 @@ export function PivotSheet() {
       } catch {
         // ignore cache write error
       }
+      restorePivotMonths(res.mktMonths);
       toast.success(
         `Đã cập nhật ${res.processedMktFiles} file MKT Local; ${nextMktTypeCache.typeColumns.length} cột TYPE đã được ghi nhớ, các cột khác giữ nguyên`,
       );
@@ -1478,11 +1532,7 @@ export function PivotSheet() {
         }
         const months = Object.keys(safeGroupedData[bu][l07] || {}).sort();
         months.forEach(month => {
-          if (selectedMonthFilter !== "ALL") {
-            const normM = month.match(/(?:THÁNG|THANG|T)?\s*(\d{1,2})[./\- ]\s*(\d{4})/i);
-            const mNorm = normM ? `${normM[1].padStart(2, "0")}.${normM[2]}` : month;
-            if (mNorm !== selectedMonthFilter && month !== selectedMonthFilter) return;
-          }
+          if (selectedMonthFilter !== "ALL" && normalizePivotMonth(month) !== selectedMonthFilter) return;
           
           let rowTotal = 0;
           const rowVals = visibleTypes.map(({ type }, vIdx) => {
@@ -1547,16 +1597,12 @@ export function PivotSheet() {
   };
 
   const availableMonths = useMemo(() => {
-    const monthsSet = new Set<string>();
-    Object.values(safeGroupedData).forEach((l07Map) => {
-      Object.values(l07Map || {}).forEach((monthMap) => {
-        Object.keys(monthMap || {}).forEach((m) => {
-          if (m && m.trim()) monthsSet.add(m.trim());
-        });
-      });
-    });
-    return Array.from(monthsSet).sort();
-  }, [safeGroupedData]);
+    const months = new Set(getPivotDataMonths(safeGroupedData));
+    if (selectedMonthFilter !== "ALL") months.add(selectedMonthFilter);
+    return [...months].sort();
+  }, [safeGroupedData, selectedMonthFilter]);
+  const canDeleteSelectedMonth = !isAppDataLoading && !isProcessing &&
+    Boolean(parsePayrollMonth(selectedMonthFilter)) && getPivotDataMonths(safeGroupedData).includes(selectedMonthFilter);
 
   const { allFlatRows, totalCenters, totalSalarySum, grandTotals, superGrandTotal } = useMemo(() => {
     let totalCenters = 0;
@@ -1596,11 +1642,7 @@ export function PivotSheet() {
         }
         const months = Object.keys(safeGroupedData[bu][l07] || {}).sort();
         months.forEach(month => {
-          if (selectedMonthFilter !== "ALL") {
-            const normM = month.match(/(?:THÁNG|THANG|T)?\s*(\d{1,2})[./\- ]\s*(\d{4})/i);
-            const mNorm = normM ? `${normM[1].padStart(2, "0")}.${normM[2]}` : month;
-            if (mNorm !== selectedMonthFilter && month !== selectedMonthFilter) return;
-          }
+          if (selectedMonthFilter !== "ALL" && normalizePivotMonth(month) !== selectedMonthFilter) return;
 
           let rowTotal = 0;
           const values = safeTypeColumns.map((type, idx) => {
@@ -2183,6 +2225,7 @@ export function PivotSheet() {
                         <input
                           ref={fileInputRef}
                           type="file"
+                          disabled={isProcessing}
                           multiple
                           accept=".xlsx,.xls,.csv"
                           onChange={(e) => {
@@ -2217,6 +2260,20 @@ export function PivotSheet() {
                     </div>
 
 
+
+                    <button
+                      type="button"
+                      disabled={!canDeleteSelectedMonth}
+                      title={selectedMonthFilter === "ALL" ? "Chọn một tháng để xóa Pivot Master" : `Xóa Pivot Master tháng ${selectedMonthFilter}`}
+                      onClick={() => {
+                        setIsSettingsOpen(false);
+                        setDeleteMonthTarget(selectedMonthFilter);
+                      }}
+                      className="flex w-full items-center gap-1.5 rounded-lg border border-destructive/20 px-2.5 py-1.5 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Xóa dữ liệu Pivot Master theo tháng
+                    </button>
 
                     <button
                       onClick={() => chooseExcelExport(handleExportExcel)}
@@ -2686,6 +2743,15 @@ export function PivotSheet() {
           </div>
         </div>
       </div>
+      <ConfirmDialog
+        isOpen={!!deleteMonthTarget}
+        onClose={() => setDeleteMonthTarget(null)}
+        onConfirm={confirmDeleteMonth}
+        title={`Xóa dữ liệu Pivot Master tháng ${deleteMonthTarget || ""}?`}
+        description="Thao tác áp dụng cho toàn bộ BU và Center trong Pivot Master của tháng này."
+        confirmText="XÓA PIVOT THÁNG NÀY"
+        variant="destructive"
+      />
       <ConfirmDialog
         isOpen={!!deleteRowTarget}
         onClose={() => setDeleteRowTarget(null)}

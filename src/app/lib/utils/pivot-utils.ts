@@ -4,6 +4,7 @@ import {
   resolveMktRosterCenter,
   resolveSummerBonusCenterL07,
 } from "./center-utils";
+import { parsePayrollMonth } from "./hold-carryover";
 import { parseDurationToHours } from "../schemas/excel-schema";
 import { normalizeGrossPaySpecialCenter, resolveMasterSpecialCenter } from "./master-special-centers";
 
@@ -24,6 +25,7 @@ export interface PivotMktTypeCache {
   typeColumns: string[];
   months: string[];
   updatedAt: number;
+  manualMonths?: string[];
 }
 
 export function normalizePivotL07(l07Raw: string): string {
@@ -128,12 +130,49 @@ export function isMktRosterTypeColumn(typeRaw: string): boolean {
 const clonePivotGroupedData = (data: PivotGroupedData = {}): PivotGroupedData =>
   JSON.parse(JSON.stringify(data || {}));
 
+export function normalizePivotMonth(value: unknown): string {
+  const month = String(value || "").trim();
+  return parsePayrollMonth(month.replace(/(\d)\s+((?:19|20)\d{2})$/, "$1.$2"))?.dot || month;
+}
+
+export function omitPivotMonths(data: PivotGroupedData, months: readonly string[]): PivotGroupedData {
+  if (months.length === 0) return data;
+  const omitted = new Set(months.map(normalizePivotMonth));
+  const result: PivotGroupedData = {};
+  for (const [bu, centers] of Object.entries(data)) {
+    for (const [l07, periods] of Object.entries(centers)) {
+      const kept = Object.entries(periods).filter(([month]) => !omitted.has(normalizePivotMonth(month)));
+      if (kept.length > 0) (result[bu] ??= {})[l07] = Object.fromEntries(kept);
+    }
+  }
+  return result;
+}
+
+export function getMasterRosterMonth(row: Record<string, unknown>, reportingMonth: string): string {
+  return normalizePivotMonth(row._fileMonth || row.month || row["Tháng báo cáo"] || row["Tháng"] || reportingMonth);
+}
+
+// Legacy Master imports appended sources. Source rows are stored in import
+// order, so keep the last identifiable file for each month as a whole.
+function latestPivotRosterRows<T extends Record<string, unknown>>(rows: T[], reportingMonth: string): T[] {
+  const latestSource = new Map<string, unknown>();
+  const sourceKey = (row: Record<string, unknown>) => row._masterInputId || row._sourceFile;
+  for (const row of rows) {
+    if (row && sourceKey(row)) latestSource.set(getMasterRosterMonth(row, reportingMonth), sourceKey(row));
+  }
+  return rows.filter(row => {
+    if (!row) return false;
+    const latest = latestSource.get(getMasterRosterMonth(row, reportingMonth));
+    return !latest || sourceKey(row) === latest;
+  });
+}
+
 export function getPivotDataMonths(data: PivotGroupedData = {}): string[] {
   const months = new Set<string>();
   Object.values(data || {}).forEach((l07Rows) => {
     Object.values(l07Rows || {}).forEach((monthRows) => {
       Object.keys(monthRows || {}).forEach((month) => {
-        const normalized = String(month || "").trim();
+        const normalized = normalizePivotMonth(month);
         if (normalized) months.add(normalized);
       });
     });
@@ -257,26 +296,11 @@ export function updatePivotMktTypeCache(
   incomingData: PivotGroupedData,
   incomingTypeColumns: string[],
   affectedMonths: string[],
+  manualUpload = false,
 ): PivotMktTypeCache {
-  const monthsToReplace = new Set(
-    (affectedMonths || []).map((month) => String(month || "").trim()).filter(Boolean),
-  );
-  const groupedData = clonePivotGroupedData(currentCache?.groupedData || {});
-
-  // File MKT của một tháng là nguồn chính thức cho các cột TYPE của tháng đó.
-  // Xóa snapshot TYPE cũ của đúng tháng trước khi nạp snapshot mới để không
-  // cộng trùng khi người dùng tải lại cùng một file.
-  Object.keys(groupedData).forEach((bu) => {
-    Object.keys(groupedData[bu] || {}).forEach((l07) => {
-      Object.keys(groupedData[bu][l07] || {}).forEach((month) => {
-        if (monthsToReplace.has(month)) delete groupedData[bu][l07][month];
-      });
-      if (Object.keys(groupedData[bu][l07] || {}).length === 0) {
-        delete groupedData[bu][l07];
-      }
-    });
-    if (Object.keys(groupedData[bu] || {}).length === 0) delete groupedData[bu];
-  });
+  const monthsToReplace = new Set(affectedMonths.map(normalizePivotMonth).filter(Boolean));
+  if (monthsToReplace.size === 0) return currentCache;
+  const groupedData = omitPivotMonths(currentCache.groupedData, [...monthsToReplace]);
 
   // CHỈ quản lý các cột TYPE của MKT Roster. Tuyệt đối không bao gồm LXO hay các cột Gross Pay khác!
   const managedTypes = new Set(
@@ -295,8 +319,9 @@ export function updatePivotMktTypeCache(
       ) {
         return;
       }
-      Object.entries(monthRows || {}).forEach(([month, typeRows]) => {
-        if (monthsToReplace.size > 0 && !monthsToReplace.has(month)) return;
+      Object.entries(monthRows || {}).forEach(([rawMonth, typeRows]) => {
+        const month = normalizePivotMonth(rawMonth);
+        if (!monthsToReplace.has(month)) return;
         Object.entries(typeRows || {}).forEach(([rawType, rawAmount]) => {
           const type = formatPivotTypeHeader(rawType);
           if (!managedTypes.has(type) || !isMktRosterTypeColumn(type)) return;
@@ -321,12 +346,17 @@ export function updatePivotMktTypeCache(
       new Set([...(currentCache?.months || []), ...monthsToReplace]),
     ).sort(),
     updatedAt: Date.now(),
+    manualMonths: [
+      ...(currentCache.manualMonths || []).filter(month => !monthsToReplace.has(normalizePivotMonth(month))),
+      ...(manualUpload ? monthsToReplace : []),
+    ],
   };
 }
 
 export function applyPivotMktTypeCache(
   baseData: PivotGroupedData,
   cache: PivotMktTypeCache,
+  affectedMonths?: readonly string[],
 ): PivotGroupedData {
   const result = clonePivotGroupedData(baseData || {});
   const managedTypes = new Set(
@@ -334,14 +364,14 @@ export function applyPivotMktTypeCache(
       .map(formatPivotTypeHeader)
       .filter(isMktRosterTypeColumn),
   );
-  const managedMonths = new Set(cache?.months || []);
+  const managedMonths = new Set((affectedMonths ?? cache?.months ?? []).map(normalizePivotMonth));
 
   // Chỉ xóa/cập nhật các cột TYPE MKT trong các tháng đã được quản lý.
   // Toàn bộ cột Gross Pay/Pivot khác (như LXO, EC, PT-DEMO,...) TUYỆT ĐỐI giữ nguyên 100%!
   Object.keys(result).forEach((bu) => {
     Object.keys(result[bu] || {}).forEach((l07) => {
       Object.entries(result[bu][l07] || {}).forEach(([month, typeRows]) => {
-        if (!managedMonths.has(month)) return;
+        if (!managedMonths.has(normalizePivotMonth(month))) return;
         Object.keys(typeRows || {}).forEach((rawType) => {
           const formatted = formatPivotTypeHeader(rawType);
           if (managedTypes.has(formatted) && isMktRosterTypeColumn(formatted)) {
@@ -368,16 +398,19 @@ export function applyPivotMktTypeCache(
         return;
       }
       Object.entries(monthRows || {}).forEach(([month, typeRows]) => {
+        const normalizedMonth = normalizePivotMonth(month);
+        if (affectedMonths && !managedMonths.has(normalizedMonth)) return;
+        const resultMonths = result[bu]?.[l07];
+        const matchingMonth = Object.keys(resultMonths || {}).find(key => normalizePivotMonth(key) === normalizedMonth);
+        const targetMonth = matchingMonth || normalizedMonth;
         Object.entries(typeRows || {}).forEach(([rawType, rawAmount]) => {
           const type = formatPivotTypeHeader(rawType);
           if (!managedTypes.has(type) || !isMktRosterTypeColumn(type)) return;
           const amount = Number(rawAmount);
           if (!Number.isFinite(amount)) return;
 
-          if (!result[bu]) result[bu] = {};
-          if (!result[bu][l07]) result[bu][l07] = {};
-          if (!result[bu][l07][month]) result[bu][l07][month] = {};
-          result[bu][l07][month][type] = amount;
+          const center = ((result[bu] ??= {})[l07] ??= {});
+          (center[targetMonth] ??= {})[type] = amount;
         });
       });
     });
@@ -524,6 +557,7 @@ export function buildPivotFromAppData(
     const specialCenter = resolveMasterSpecialCenter(l07Raw, bu);
     const l07 = specialCenter?.l07 || normalizePivotL07((l07Raw || "UNKNOWN").trim());
     if (specialCenter) bu = specialCenter.business;
+    month = normalizePivotMonth(month);
     const type = formatPivotTypeHeader(typeRaw);
 
     if (type === "EXCLUDE" || type === "ADD" || type === "CANCEL") return;
@@ -642,7 +676,7 @@ export function buildPivotFromAppData(
 
   // holdRows removed as per user request ("xóa hold đi, ko lấy dữ liệu sheet hold ae_master")
 
-  rosterRows.forEach((row) => {
+  latestPivotRosterRows(rosterRows, activeReportingMonth || "03.2026").forEach((row) => {
     if (!row) return;
     const center = String(
       row["chargeToCenterCode"] ||
@@ -689,13 +723,7 @@ export function buildPivotFromAppData(
       row["Business"] ||
       row["business"] ||
       getBusinessFromL07(l07);
-    const month =
-      row["_fileMonth"] ||
-      row["month"] ||
-      row["Tháng báo cáo"] ||
-      row["Tháng"] ||
-      activeReportingMonth ||
-      "03.2026";
+    const month = getMasterRosterMonth(row, activeReportingMonth || "03.2026");
     const rawRowType = row["type"] || row["Type"] || row["LOẠI"] || row["Phân loại"] || row["Nghiệp vụ"] || "MKT LOCAL";
     let rowType = formatPivotTypeHeader(rawRowType);
 
