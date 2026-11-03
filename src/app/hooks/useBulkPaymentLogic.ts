@@ -11,6 +11,7 @@ import {
 } from "../lib/utils/data-utils";
 import { toast } from "sonner";
 import { classifyHoldOperation } from "../lib/utils/bulk-payment-analytics";
+import { pendingMasterUpdate } from "../lib/utils/master-source-refresh";
 import {
   commitTransactionEdits,
   hasPendingTransactionEdits as hasPendingTransactionEditsInData,
@@ -671,6 +672,10 @@ export function useBulkPaymentLogic() {
 
   // 5. DATA GENERATION ACTION
   const handleGenerateReport = useCallback(async () => {
+    if (pendingMasterUpdate(appData, appData.globalMonth)) {
+      toast.warning("Hãy mở khóa Deduction của tháng này để áp dụng Master mới.");
+      return;
+    }
     const rawSrc = appData.Bank_North_AE.data;
     if (rawSrc.length === 0) {
       toast.error(

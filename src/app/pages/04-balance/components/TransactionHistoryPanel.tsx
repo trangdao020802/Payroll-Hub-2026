@@ -19,6 +19,7 @@ interface Props {
   onApplyVersions: (versions: TransactionVersion[]) => void;
   localMonths?: LocalTransactionMonths;
   hasPendingEdits: boolean;
+  masterUpdatePending?: boolean;
   syncRevision?: number;
   onReportStateChange?: (hasExceptions: boolean, viewingSource: boolean) => void;
 }
@@ -45,7 +46,7 @@ const markedDocumentId = (value: string, syncNote: string) => (
   value ? `${value}${syncNote ? '!' : ''}` : '—'
 );
 
-export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport, onApplyVersions, localMonths, hasPendingEdits, syncRevision = 0, onReportStateChange }: Props) {
+export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport, onApplyVersions, localMonths, hasPendingEdits, masterUpdatePending, syncRevision = 0, onReportStateChange }: Props) {
   const cloud = useCloudWorkspace();
   const [userId, setUserId] = useState('');
   const [email, setEmail] = useState('');
@@ -63,7 +64,7 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
   const retry = useRef<{context: object; requestId: string} | null>(null);
   // AppData updates are immutable. Include retained months so a history edit
   // also invalidates reports and in-flight reads without serializing every row.
-  const context = useMemo(() => ({month, rows, userId, hasPendingEdits, defaultBank, syncRevision, localMonths}), [month, rows, userId, hasPendingEdits, defaultBank, syncRevision, localMonths]);
+  const context = useMemo(() => ({month, rows, userId, hasPendingEdits, masterUpdatePending, defaultBank, syncRevision, localMonths}), [month, rows, userId, hasPendingEdits, masterUpdatePending, defaultBank, syncRevision, localMonths]);
   const currentContext = useRef(context);
   useEffect(() => { currentContext.current = context; }, [context]);
   useEffect(() => {
@@ -126,6 +127,9 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
     if (currentContext.current !== started) return false;
     const conflicts = conflictingLocalTransactionPeriods(source, rows, month, localMonths);
     if (conflicts.length) {
+      if (conflicts.some(period => localMonths?.[period]?.masterDraft)) {
+        throw new HistorySaveConflictError(`Có Batch Payment từ Master mới ở tháng ${formatResolutionPeriods(conflicts)}. Kiểm tra và bấm Lưu tháng trước khi Check STK & ID.`);
+      }
       throw new HistorySaveConflictError(
         `Batch Payment đã lưu trên máy khác dữ liệu Supabase ở tháng ${formatResolutionPeriods(conflicts)}. Mở từng tháng, kiểm tra bản đúng rồi bấm Lưu tháng để đưa bản trên máy lên Supabase, hoặc Cài đặt → Tải tháng để dùng bản Supabase. Sau đó Check STK & ID lại.`,
       );
@@ -141,6 +145,10 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
 
   async function run(action: 'save' | 'check' | 'load') {
     if (operation.current || hasPendingEdits) return;
+    if (masterUpdatePending) {
+      setMessage('Hãy mở khóa Deduction của tháng này để áp dụng Master mới trước khi thao tác với bản lưu.');
+      return;
+    }
     operation.current = true;
     setBusy(true);
     setMessage('');
@@ -154,6 +162,7 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
       if (!isSupabaseConfigured()) throw new Error('Chưa cấu hình Supabase URL và publishable/anon key.');
       if (action === 'save') {
         const selected = selectPeriodRows(rows, month);
+        if (!selected.length) throw new Error('Tháng này không có dòng chi để lưu vào lịch sử Batch Payment. Dùng Đồng bộ ngay để lưu bản làm việc.');
         if (retry.current?.context !== started) retry.current = {context: started, requestId: crypto.randomUUID()};
         const id = await saveVersion(supabase, month, selected, retry.current.requestId);
         retry.current = null;
@@ -176,6 +185,9 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
         const latest = await loadLatestVersion(supabase, month);
         if (!latest) throw new Error('Tháng này chưa có dữ liệu trên Supabase.');
         requireUnchangedContext(started);
+        if (localMonths?.[latest.period.slice(0, 7)]?.masterDraft && !sameTransactionSnapshot(rows, latest.rows, month)) {
+          throw new Error('Batch Payment có dữ liệu Master mới. Kiểm tra và bấm Lưu tháng để cập nhật bản Supabase.');
+        }
         onApplyVersions([latest]);
         if (cloud?.authenticated) await cloud.flush();
         if (stillViewingMonth()) setMessage(`Đã tải tháng ${month} từ Supabase (#${latest.id}). Bấm Check STK & ID để đối chiếu.`);

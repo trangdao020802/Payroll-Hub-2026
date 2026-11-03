@@ -374,13 +374,14 @@ export function AEDataConfig({
             ? {
                 ...row,
                 fileObj: file,
+                previousSourceName: row.previousSourceName || row.name,
                 name: file.name,
                 status: "Uploaded",
                 bank: guessedBank || row.bank,
                 month:
                   parseMonthFromFileName(file.name) ||
-                  prev.globalMonth ||
-                  row.month,
+                  row.month ||
+                  prev.globalMonth,
                 columnMapping: parsed.mapping,
               }
             : row,
@@ -581,6 +582,7 @@ export function AEDataConfig({
 
     const nextInputs = appData.Ae_Global_Inputs.map((row) => {
         const update = updates.find((u) => u.id === row.id);
+      if (update) preparedMasterFilesRef.current.delete(row.id);
         return update
           ? {
               ...row,
@@ -589,8 +591,8 @@ export function AEDataConfig({
               bank: update.bank || row.bank,
               month:
                 parseMonthFromFileName(update.file.name) ||
-                appData.globalMonth ||
-                row.month,
+                row.month ||
+                appData.globalMonth,
               columnMapping: update.columnMapping,
             }
           : row;

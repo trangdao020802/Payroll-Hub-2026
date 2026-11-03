@@ -162,6 +162,7 @@ export function Navbar({ onOpenSettings }: NavbarProps) {
   const shouldAutoSyncReconciliation = location.pathname === "/master-ae" || location.pathname === "/payment" || location.pathname === "/pivot";
   const currentMonth = appData.globalMonth || "03.2026";
   const bankSourceRowCount = appData.Bank_North_AE?.data?.length || 0;
+  const hasRetainedTransactions = Boolean(Object.keys(appData.TransactionMonthCache?.months || {}).length);
   const lastAutoSyncedMonthRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -169,7 +170,7 @@ export function Navbar({ onOpenSettings }: NavbarProps) {
     // flight. Do not regenerate payments from that stale cache: the sync
     // engine would retain the automatic write as a new local edit.
     if (cloud?.authenticated && cloud.state.status !== "synced") return;
-    if (!shouldAutoSyncReconciliation || bankSourceRowCount === 0) {
+    if (!shouldAutoSyncReconciliation || (!bankSourceRowCount && !hasRetainedTransactions)) {
       lastAutoSyncedMonthRef.current = null;
       return;
     }
@@ -184,7 +185,7 @@ export function Navbar({ onOpenSettings }: NavbarProps) {
     updateAppData((prev) =>
       syncReportingMonthReconciliation(prev, currentMonth),
     );
-  }, [bankSourceRowCount, currentMonth, shouldAutoSyncReconciliation, updateAppData, cloud?.authenticated, cloud?.state.status, appData.TransactionMonthCache?.activePeriod, appData.ReconciliationByMonth]);
+  }, [bankSourceRowCount, hasRetainedTransactions, currentMonth, shouldAutoSyncReconciliation, updateAppData, cloud?.authenticated, cloud?.state.status, appData.TransactionMonthCache?.activePeriod, appData.ReconciliationByMonth]);
 
   return (
     <header 

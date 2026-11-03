@@ -112,7 +112,7 @@ import {
 } from "../../components/ui/select";
 import { DataTable, isAhpBuValue, type DataTableRef } from "../../components/DataTable";
 import { BulkPaymentAnalytics } from "./components/BulkPaymentAnalytics";
-import { buildBulkPaymentAnalytics } from "../../lib/utils/bulk-payment-analytics";
+import { buildBulkPaymentAnalytics, parseMonthPeriod } from "../../lib/utils/bulk-payment-analytics";
 import { markTransactionSaved } from "../../lib/utils/transaction-activity";
 import { applyLocalTransactionVersions } from "../../lib/utils/transaction-local-history";
 import type { TransactionVersion } from "../../lib/transaction-history-store";
@@ -270,6 +270,9 @@ export function BulkPayment({
   ) => void;
 } = {}) {
   const { appData, updateAppData } = useAppData();
+  const masterPeriod = parseMonthPeriod(appData.globalMonth)?.key || "";
+  const masterUpdatePending = Boolean(appData.TransactionMonthCache?.pendingMaster?.[masterPeriod]);
+  const masterDraft = Boolean(appData.TransactionMonthCache?.months[masterPeriod]?.masterDraft);
 
   const {
     globalMonth,
@@ -3266,11 +3269,21 @@ export function BulkPayment({
         </div>
         )}
 
+        {(masterUpdatePending || masterDraft) && rightPanelTab !== "visuals" && (
+          <p role="status" className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
+            {masterUpdatePending
+              ? "Có file Master mới đang chờ mở khóa Deduction của tháng này."
+              : appData.BankExport.data.length
+                ? "Batch Payment đã dùng nguồn Master mới. Kiểm tra số liệu rồi bấm Lưu tháng để cập nhật bản lưu."
+                : "Sheet Bank của tháng này không có dòng chi. Dùng Đồng bộ ngay để lưu bản làm việc vào kho Payroll."}
+          </p>
+        )}
         <div hidden={rightPanelTab === "visuals"}>
           <TransactionHistoryPanel
             hasPendingEdits={hasPendingTransactionEdits}
+            masterUpdatePending={masterUpdatePending}
             syncRevision={appData.TransactionActivity?.saveVersion || 0}
-            rows={appData.BankExport?.data?.length ? appData.BankExport.data : appData.Bank_North_AE?.data || []}
+            rows={masterDraft || appData.BankExport?.data?.length ? appData.BankExport.data : appData.Bank_North_AE?.data || []}
             month={appData.globalMonth || ""}
             showReport={rightPanelTab === "reconcile"}
             onOpenReport={() => setRightPanelTab("reconcile")}

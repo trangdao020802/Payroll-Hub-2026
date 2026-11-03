@@ -52,7 +52,8 @@ export function getTransactionMonthOriginal(data: AppData): TableData {
   const period = normalizePeriod(data.globalMonth);
   // A verified saved month supersedes the generated pre-edit baseline. Reset
   // must not undo saved amounts or identity corrections after a cloud restore.
-  const saved = data.TransactionMonthCache?.cloudMonths?.[period];
+  const saved = data.TransactionMonthCache?.months[period]?.masterDraft
+    ? undefined : data.TransactionMonthCache?.cloudMonths?.[period];
   if (saved) {
     if (normalizePeriod(saved.period.slice(0, 7)) !== period ||
         saved.rows.some(row => periodOf(row['Tháng báo cáo'] || row._fileMonth) !== period)) {

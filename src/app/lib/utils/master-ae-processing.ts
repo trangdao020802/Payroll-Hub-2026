@@ -16,9 +16,8 @@ import {
   isBankMasterSheetName, isHoldMasterSheetName, isRosterMasterSheetName,
   isSheetOneMasterSheetName, normalizeMasterSheetName,
 } from "./master-sheet-utils";
-import {
-  getHoldScopedIdentity, mergeDuplicateHoldRows, reconcileHoldTransactionRows,
-} from "./hold-carryover";
+import { parsePayrollMonth } from "./hold-carryover";
+import { applyMasterSourceRefresh, matchesMasterSource, type MasterSourceScope } from "./master-source-refresh";
 import { resolveDeductionsSheetSource } from "./deductions-sheet-source";
 import { hasRequiredDeductionsFields } from "./deductions-row-validation";
 import { resolveGrossPayTotal } from "./gross-pay";
@@ -76,6 +75,7 @@ export interface AERow {
   status: string;
   bank?: string;
   month?: string;
+  previousSourceName?: string;
   columnMapping?: Record<string, string>;
 }
 
@@ -110,6 +110,8 @@ export async function processMasterAEData(
   }
 
   const normalizeMonth = (m: any) => {
+    const payrollMonth = parsePayrollMonth(m);
+    if (payrollMonth) return payrollMonth.dot;
     const str = String(m || "").trim().toUpperCase();
     if (!str) return "";
     const match = str.match(/(?:THÁNG|THANG|T)?\s*(\d{1,2})[./\- ]\s*(\d{4})/i);
@@ -185,6 +187,10 @@ export async function processMasterAEData(
     const soSanhAeData: any[] = [];
     const rosterDataToAppend: any[] = [];
     const statusById = new Map<string, string>();
+    const bankSources: MasterSourceScope[] = [];
+    const holdSources: MasterSourceScope[] = [];
+    const grossSources: MasterSourceScope[] = [];
+    const rosterSources: MasterSourceScope[] = [];
     const preparedFiles =
       preparedOverride || preparedMasterFiles;
 
@@ -226,6 +232,21 @@ export async function processMasterAEData(
       if (!item.fileObj) continue;
 
       const itemMonth = item.month || parseMonthFromFileName(item.name || item.fileObj.name) || appData.globalMonth || "03.2026";
+      const parsedMonth = parsePayrollMonth(itemMonth);
+      if (!parsedMonth) {
+        statusById.set(item.id, "Error: Tháng báo cáo không hợp lệ");
+        continue;
+      }
+      const scope: MasterSourceScope = {
+        inputId: item.id, name: item.name, previousName: item.previousSourceName, month: parsedMonth.dot,
+        replacementRequested: item.status === "ready" || item.status === "Uploaded",
+      };
+      const bankStart = bankData.length;
+      const holdStart = holdData.length;
+      const grossStart = sheet1Data.length;
+      const rosterStart = rosterDataToAppend.length;
+      let bankSheetRead = false;
+      let holdSheetRead = false;
 
       processedFiles++;
       setProgress(Math.round((processedFiles / totalFiles) * 100));
@@ -263,7 +284,7 @@ export async function processMasterAEData(
         for (const parsedSheet of parsedWorkbook.sheets) {
           const { sheetName, rows } = parsedSheet;
           try {
-            if (rows.length <= 1) continue;
+            if (!rows.length) continue;
 
             const normalizedSheetName = normalizeMasterSheetName(sheetName);
             let sheetProcessed = false;
@@ -272,6 +293,7 @@ export async function processMasterAEData(
             const isBankSheet = isBankMasterSheetName(sheetName);
             const isHoldSheet = isHoldMasterSheetName(sheetName);
             const isSheetOneSheet = isSheetOneMasterSheetName(sheetName);
+            if (rows.length === 1 && !isBankSheet && !isHoldSheet && !normalizedSheetName.includes("ADD")) continue;
 
             if (isRosterSheet) {
               let headerRowIndex = -1;
@@ -437,6 +459,7 @@ export async function processMasterAEData(
                   itemColumnMapping,
                   ["TOTAL", "TỔNG", "THỰC NHẬN"],
                 );
+                bankSheetRead ||= iN >= 0 && iA >= 0 && iT >= 0;
                 const iP = getColIndex(
                   h,
                   "Payment details",
@@ -640,29 +663,7 @@ export async function processMasterAEData(
               foundAnySheet = true;
               sheetProcessed = true;
 
-              // Identify file month
-              let fileMonthNum = -1;
-              const monthStr = appData.globalMonth || "03.2026";
-              const lowerMonth = String(monthStr).toLowerCase().trim();
-              const monthNames = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-              for (let i = 0; i < monthNames.length; i++) {
-                if (lowerMonth.includes(monthNames[i])) {
-                  fileMonthNum = i + 1;
-                  break;
-                }
-              }
-              if (fileMonthNum === -1) {
-                const match = lowerMonth.match(/(?:t|tháng|thang)\s*(\d{1,2})/);
-                if (match) fileMonthNum = parseInt(match[1], 10);
-                else {
-                  const match2 = lowerMonth.match(/(\d{1,2})\/\d{4}/);
-                  if (match2) fileMonthNum = parseInt(match2[1], 10);
-                  else {
-                    const match3 = lowerMonth.match(/\b(0?[1-9]|1[0-2])\b/);
-                    if (match3) fileMonthNum = parseInt(match3[1], 10);
-                  }
-                }
-              }
+              const fileMonthNum = parsePayrollMonth(itemMonth)?.month || -1;
 
               const getRowShouldNegate = (noteValue: string) => {
                 let rowShouldNegate = false;
@@ -703,6 +704,7 @@ export async function processMasterAEData(
 
               if (headerRowIndex !== -1) {
                 // Header found - use dynamic mapping
+                holdSheetRead = true;
                 const h = rows[headerRowIndex].map((c) =>
                   String(c || "").trim(),
                 );
@@ -1232,6 +1234,13 @@ export async function processMasterAEData(
 
         if (fileProcessedSuccessfully) {
           statusById.set(item.id, "Success");
+          for (const [rows, start] of [[bankData, bankStart], [holdData, holdStart], [sheet1Data, grossStart], [rosterDataToAppend, rosterStart]] as const) {
+            for (let index = start; index < rows.length; index++) rows[index]._masterInputId = item.id;
+          }
+          if (bankSheetRead && (bankData.length === bankStart || bankData.slice(bankStart).some(row => row["Bank Account Number"]))) bankSources.push(scope);
+          if (holdSheetRead || holdData.length > holdStart) holdSources.push(scope);
+          if (sheet1Data.length > grossStart) grossSources.push(scope);
+          if (rosterDataToAppend.length > rosterStart) rosterSources.push(scope);
         } else {
           statusById.set(item.id, "Error: Invalid format");
         }
@@ -1443,106 +1452,24 @@ export async function processMasterAEData(
     const verifiedHoldData = finalHoldData.filter(
       hasRequiredDeductionsFields,
     );
+    const validHoldSources = holdSources.filter(source =>
+      verifiedHoldData.some(row => matchesMasterSource(row, source)) || !finalHoldData.some(row => matchesMasterSource(row, source)));
 
     updateAppData((prev) => {
       const currentMonth = prev.globalMonth || "03.2026";
-      const existingHoldData = prev.Hold_AE?.data || [];
       const uploadTime = new Date().toISOString();
-
-      // Standardize monthly values and fields for new incoming rows
-      verifiedHoldData.filter(Boolean).forEach((row) => {
-        let rMonth = currentMonth;
-        let rNghiepVu = row["Nghiệp vụ"] || "";
-
-        if (row._sourceMonth) rMonth = String(row._sourceMonth).trim();
-        if (row._sourceOperation) {
-          rNghiepVu = String(row._sourceOperation).trim();
-        }
-
-        const rawMonth = row["Tháng báo cáo"] || row["_fileMonth"] || rMonth;
-        row["Tháng báo cáo"] = normalizeMonth(rawMonth) || normalizeMonth(currentMonth);
-        if (!row["Nghiệp vụ"]) row["Nghiệp vụ"] = rNghiepVu || "Hold";
+      const importedHolds = verifiedHoldData.map(source => {
+        const row = {...source};
+        row["Tháng báo cáo"] = normalizeMonth(row["Tháng báo cáo"] || row._fileMonth || row._sourceMonth || currentMonth);
+        row["Nghiệp vụ"] = row["Nghiệp vụ"] || row._sourceOperation || "Hold";
         delete row._sourceMonth;
         delete row._sourceOperation;
-        row.id = row.id || generateUUID();
-        row._uploadTimestamp = row._uploadTimestamp || uploadTime;
+        row._uploadTimestamp = uploadTime;
+        return row;
       });
 
-      const holdKeyFn = (r: any) => {
-        if (!r) return "";
-        const exactScopedKey = getHoldScopedIdentity(r, currentMonth);
-        if (exactScopedKey) return exactScopedKey;
-
-        // Keep malformed legacy rows isolated instead of collapsing them by
-        // the old broad ID + amount comparison.
-        const reportMonth = normalizeMonth(
-          r["Tháng báo cáo"] || r["_fileMonth"] || currentMonth,
-        );
-        return `LEGACY|${reportMonth}|${String(
-          r._recordId || r.id || generateUUID(),
-        )}`;
-      };
-
-      // Group and map existing data by ID/Key and Timestamp
-      const recordsMap = new Map<string, any>();
-      const mergeSameScopedRecord = (existing: any, incoming: any) => {
-        const reconciledPair = mergeDuplicateHoldRows(
-          [existing, incoming],
-          { scopeByReportMonth: true },
-        );
-
-        // HOLD-origin rows collapse to one transaction and preserve a
-        // resolved CANCEL/ADD even when a newer workbook repeats the HOLD.
-        if (reconciledPair.length === 1) return reconciledPair[0];
-
-        const existingTime = new Date(existing._uploadTimestamp || 0).getTime();
-        const incomingTime = new Date(incoming._uploadTimestamp || 0).getTime();
-        return incomingTime >= existingTime ? incoming : existing;
-      };
-
-      existingHoldData.filter(hasRequiredDeductionsFields).forEach((row) => {
-        const key = holdKeyFn(row);
-        row.id = row.id || generateUUID();
-        row._recordId = row._recordId || key;
-        if (!row._uploadTimestamp) {
-          row._uploadTimestamp = new Date(0).toISOString(); // Backfill old records
-        }
-
-        const existing = recordsMap.get(key);
-        if (!existing) {
-          recordsMap.set(key, row);
-        } else {
-          recordsMap.set(key, mergeSameScopedRecord(existing, row));
-        }
-      });
-
-      // Merge incoming verified hold data
-      verifiedHoldData.forEach((row) => {
-        const key = holdKeyFn(row);
-        row._recordId = row._recordId || key;
-
-        const existing = recordsMap.get(key);
-        if (!existing) {
-          recordsMap.set(key, row);
-        } else {
-          recordsMap.set(key, mergeSameScopedRecord(existing, row));
-        }
-      });
-
-      const mergedHoldData = reconcileHoldTransactionRows(
-        Array.from(recordsMap.values()),
-      );
-
-      // Re-calculate row numbers
-      mergedHoldData.forEach((row, idx) => {
-        row["No."] = idx + 1;
-        row["No"] = idx + 1;
-      });
-
-      // Merge Sheet1_AE with existing data to keep multiple months
-      const existingSheet1 = (prev.Sheet1_AE?.data || []).filter((row: any) =>
-        !targets.some(target => row["TÊN FILE"] === target.name &&
-          normalizeMonth(row._fileMonth || row["Tháng báo cáo"]) === normalizeMonth(target.month || currentMonth)));
+      const existingSheet1 = (prev.Sheet1_AE?.data || []).filter(row =>
+        !grossSources.some(source => matchesMasterSource(row, source)));
 
       const sheet1Map = new Map<string, any>();
 
@@ -1577,13 +1504,8 @@ export async function processMasterAEData(
       // Bank North is also month-scoped source data for Batch Payment.
       // Preserve untouched months exactly like Gross Pay instead of replacing
       // the whole table every time a newer AE Final workbook is processed.
-      const existingBankData = (prev.Bank_North_AE?.data || []).filter((row: any) =>
-        !targets.some((target) =>
-          row["TÊN FILE"] === target.name &&
-          normalizeMonth(row["Tháng báo cáo"] || row["_fileMonth"]) ===
-            normalizeMonth(target.month || currentMonth),
-        ),
-      );
+      const existingBankData = (prev.Bank_North_AE?.data || []).filter(row =>
+        !bankSources.some(source => matchesMasterSource(row, source)));
       const bankMap = new Map<string, any>();
       const getBankKey = (r: any) => {
         if (!r) return "";
@@ -1617,14 +1539,14 @@ export async function processMasterAEData(
         row["No"] = idx + 1;
       });
 
-      return {
+      const imported: AppData = {
         ...prev,
         Ae_Global_Inputs: prev.Ae_Global_Inputs.map((row) => ({
           ...row,
           status: statusById.get(row.id) || row.status,
         })),
         Master_Roster: [
-          ...(prev.Master_Roster || []).filter(r => !targets.some(t => t.name === r._sourceFile)),
+          ...(prev.Master_Roster || []).filter(row => !rosterSources.some(source => matchesMasterSource(row, source))),
           ...rosterDataToAppend
         ],
         Bank_North_AE: {
@@ -1655,11 +1577,10 @@ export async function processMasterAEData(
         },
         Hold_AE_Source: {
           headers: ["No.", "BU", "L07", "ID Number", "Full name", "Bank Account Number", "TOTAL PAYMENT", "Sheet Source", "Tháng báo cáo", "Nghiệp vụ", "Note"],
-          data: structuredClone([
-            ...(prev.Hold_AE_Source?.data || []).filter((row: any) => !targets.some(item =>
-              row["TÊN FILE"] === item.name && normalizeMonth(row._fileMonth || row["Tháng báo cáo"]) === normalizeMonth(item.month || currentMonth))),
-            ...verifiedHoldData,
-          ]),
+          data: [
+            ...(prev.Hold_AE_Source?.data || []).filter(row => !validHoldSources.some(source => matchesMasterSource(row, source))),
+            ...importedHolds,
+          ],
         },
         Hold_AE: {
           headers: [
@@ -1679,16 +1600,17 @@ export async function processMasterAEData(
             "Note",
             "Nghiệp vụ",
           ],
-          data: mergedHoldData,
+          data: prev.Hold_AE?.data || [],
         },
       };
+      return applyMasterSourceRefresh(prev, imported, validHoldSources, bankSources);
     }, false, true, ["Sheet1_AE", "Bank_North_AE", "Hold_AE", "Master_Roster"]);
 
     // Đồng bộ dữ liệu Pivot Master
     try {
       const retainedRosterRows = (appData.Master_Roster || []).filter(
         (row: any) =>
-          !targets.some((target) => target.name === row?._sourceFile),
+          !rosterSources.some(source => matchesMasterSource(row, source)),
       );
       const rosterRowsForPivot = [
         ...retainedRosterRows,

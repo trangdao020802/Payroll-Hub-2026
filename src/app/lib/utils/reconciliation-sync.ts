@@ -137,6 +137,11 @@ export function getReconciliationActualSource(
       appData.globalMonth ||
       reportMonth,
   );
+  const cached = appData.TransactionMonthCache?.months[target.key];
+  if (cached?.masterDraft) {
+    const rows = active?.key === target.key ? appData.BankExport?.data ?? cached.table.data : cached.table.data;
+    return { rows, confirmed: false, available: true, allowMissingMonth: false, source: 'batch-payment' };
+  }
   if (
     target &&
     active?.key === target.key &&
@@ -146,13 +151,17 @@ export function getReconciliationActualSource(
   ) {
     return { rows: appData.BankExport.data, confirmed: true, available: true, source: 'batch-payment' };
   }
-  const cached = appData.TransactionMonthCache?.months[target.key];
   if (cached?.activity?.lastAction === "saved" && (!cached.table.data.length ||
       cached.table.data.some(row => bankRowMatchesReportMonth(row, reportMonth))))
     return { rows: cached.table.data, confirmed: true, available: true, source: 'batch-payment' };
 
   const savedMonth = appData.TransactionMonthCache?.cloudMonths?.[target.key];
   if (savedMonth) return {rows: savedMonth.rows, confirmed: true, available: true, source: 'batch-payment'};
+
+  if (appData.TransactionMonthCache?.pendingMaster?.[target.key]) {
+    const rows = cached?.table.data || (active?.key === target.key ? appData.BankExport?.data : []) || [];
+    return {rows, confirmed: false, available: Boolean(rows.length), source: rows.length ? 'batch-payment' : 'missing'};
+  }
 
   const bankNorthRows = appData.Bank_North_AE?.data || [];
   const allowMissingMonth = active?.key === target.key;
@@ -439,14 +448,16 @@ export function syncReportingMonthReconciliation(
     };
   }
   const storedMonth = appData.TransactionMonthCache?.cloudMonths?.[period];
-  const existing = months[period] || (storedMonth ? {table: {...currentTable, data: storedMonth.rows}, activity: {
+  const existing: (typeof months)[string] | undefined = months[period] || (storedMonth ? {table: {...currentTable, data: storedMonth.rows}, activity: {
     generatedAt: storedMonth.created_at, lastSavedAt: storedMonth.created_at, editCount: 0, saveVersion: 0, lastAction: 'saved' as const,
   }, cloudVersionId: storedMonth.id} : undefined);
-  const refreshedRows = buildBankExportRowsForMonth(appData, month);
+  const pendingMaster = appData.TransactionMonthCache?.pendingMaster?.[period];
+  const refreshedRows = pendingMaster ? [] : buildBankExportRowsForMonth(appData, month);
   // Only untouched generated data may be refreshed from Bank AE, and only
   // when that month still exists in the source. Never erase a cached historical
   // Batch Payment month merely because Bank North was reloaded without it.
   const keepExisting = Boolean(existing) && (
+    existing?.masterDraft ||
     existing?.activity?.lastAction !== "generated" ||
     refreshedRows.length === 0
   );

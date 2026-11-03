@@ -17,8 +17,9 @@ export type TableOriginals = Partial<Pick<AppData, OriginalField>> & {
 /** Explicit imports replace the baseline; edits retain the first pre-edit value. */
 export function trackTableOriginals(previous: AppData, next: AppData, isEdit: boolean,
   sourceFields: readonly OriginalField[] = []): AppData {
-  if (previous === next || next.TableOriginals !== previous.TableOriginals) return next;
-  const tracked = trackTransactionMonthOriginal(previous, next, isEdit, sourceFields.includes('BankExport'));
+  const alreadyTracked = next.TableOriginals !== previous.TableOriginals;
+  if (previous === next || (alreadyTracked && !sourceFields.length)) return next;
+  const tracked = alreadyTracked ? next : trackTransactionMonthOriginal(previous, next, isEdit, sourceFields.includes('BankExport'));
   next = tracked;
   const originals = { ...next.TableOriginals };
   let changed = tracked.TableOriginals !== previous.TableOriginals;
@@ -53,13 +54,14 @@ export function restoreTableOriginals(data: AppData, fields: readonly OriginalFi
     const savedAt = new Date().toISOString();
     restored.BankExport = {...original, data: replaceTransactionPeriod(data.BankExport.data, period, original.data)};
     restored.TransactionActivity = markTransactionSaved(data, savedAt);
+    const masterDraft = data.TransactionMonthCache?.months[period]?.masterDraft;
     restored.TransactionMonthCache = {
       ...data.TransactionMonthCache,
       activePeriod: period,
       months: {
         ...data.TransactionMonthCache?.months,
         [period]: {table: original, activity: restored.TransactionActivity,
-          cloudVersionId: data.TransactionMonthCache?.cloudMonths?.[period]?.id},
+          ...(masterDraft ? {masterDraft} : {cloudVersionId: data.TransactionMonthCache?.cloudMonths?.[period]?.id})},
       },
     };
     restored.ReconciliationByMonth = {

@@ -42,7 +42,7 @@ export function getSavedLocalTransactionSnapshots(
     .flatMap(([period, snapshot]) => {
       try {
         const normalized = normalizeSnapshotPeriod(period);
-        return normalized < before && snapshot.activity?.lastAction === 'saved'
+        return normalized < before && (snapshot.activity?.lastAction === 'saved' || snapshot.masterDraft)
           ? [{period: normalized, rows: snapshot.table.data as TransactionRow[]}]
           : [];
       } catch { return []; }

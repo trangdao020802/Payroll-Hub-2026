@@ -151,10 +151,10 @@ export function parsePayrollMonth(value: unknown): PayrollMonth | null {
   if (!raw) return null;
 
   const monthFirst = raw.match(
-    /(?:TH[AÁ]NG|THANG|THG|T)?\s*(0?[1-9]|1[0-2])\s*[./-]\s*((?:19|20)\d{2})/i,
+    /(?:^|\D)(?:TH[AÁ]NG|THANG|THG|T)?\s*(0?[1-9]|1[0-2])\s*[./-]\s*((?:19|20)\d{2})(?!\d)/i,
   );
   const yearFirst = raw.match(
-    /((?:19|20)\d{2})\s*[./-]\s*(0?[1-9]|1[0-2])/i,
+    /(?:^|\D)((?:19|20)\d{2})\s*[./-]\s*(0?[1-9]|1[0-2])(?!\d)/i,
   );
 
   const month = monthFirst

@@ -10,11 +10,15 @@ export function useTableRestore() {
     try {
       restoreTableOriginals(appData, fields);
       updateAppData(prev => restoreTableOriginals(prev, fields), true, true);
-      toast.success(fields.includes('BankExport')
-        ? appData.TransactionMonthCache?.cloudMonths?.[normalizePeriod(appData.globalMonth)]
-          ? `Đã khôi phục Batch Payment tháng ${appData.globalMonth} theo bản tháng đã lưu gần nhất.`
-          : `Đã khôi phục Batch Payment tháng ${appData.globalMonth}. Bấm Lưu tháng để cập nhật lịch sử Check STK & ID.`
-        : 'Đã khôi phục dữ liệu trước chỉnh sửa của bảng.');
+      let message = 'Đã khôi phục dữ liệu trước chỉnh sửa của bảng.';
+      if (fields.includes('BankExport')) {
+        const period = normalizePeriod(appData.globalMonth);
+        const prefix = `Đã khôi phục Batch Payment tháng ${appData.globalMonth}`;
+        if (appData.TransactionMonthCache?.months[period]?.masterDraft) message = `${prefix} theo nguồn Master mới.`;
+        else if (appData.TransactionMonthCache?.cloudMonths?.[period]) message = `${prefix} theo bản tháng đã lưu gần nhất.`;
+        else message = `${prefix}. Bấm Lưu tháng để cập nhật lịch sử Check STK & ID.`;
+      }
+      toast.success(message);
       return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Không thể khôi phục dữ liệu.');

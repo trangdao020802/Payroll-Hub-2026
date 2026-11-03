@@ -108,8 +108,9 @@ export interface AppData {
   /** Working Transaction months and verified history, both persisted with the cloud workspace. */
   TransactionMonthCache?: {
     activePeriod: string;
-    months: Record<string, {table: TableData; activity?: AppData['TransactionActivity']; cloudVersionId?: string}>;
+    months: Record<string, {table: TableData; activity?: AppData['TransactionActivity']; cloudVersionId?: string; masterDraft?: boolean}>;
     cloudMonths?: Record<string, import('../lib/transaction-history-store').TransactionVersion>;
+    pendingMaster?: Record<string, {sources: import('../lib/utils/master-source-refresh').MasterSourceScope[]; refreshBatch: boolean}>;
   };
   /** Respect explicit table/page deletion until new payments are generated or a month is loaded. */
   TransactionHistoryRestoreDisabled?: boolean;

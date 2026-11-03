@@ -15,18 +15,21 @@ export function restoreSavedTransactionMonths(data: AppData, versions: Transacti
   let changed = false;
   for (const version of versions) {
     const key = normalizePeriod(version.period.slice(0, 7));
+    const working = months[key];
+    const matchesMasterDraft = working?.masterDraft && sameTransactionSnapshot(working.table.data, version.rows, key);
     if (cloudMonths[key]?.id !== version.id) {
       const rows = version.rows.length ? selectPeriodRows(version.rows, key) : [];
       if (rows.length !== version.rows.length) throw new Error('Batch Payment đã lưu có dòng không đúng tháng nguồn.');
       cloudMonths[key] = version;
-      next = withTransactionMonthOriginal(next, key, {...data.BankExport, data: version.rows});
+      if (!working?.masterDraft) next = withTransactionMonthOriginal(next, key, {...data.BankExport, data: version.rows});
       changed = true;
     }
-    const working = months[key];
+    // A new Master import owns this working month until that exact revision is saved.
+    if (working?.masterDraft && !matchesMasterDraft) continue;
     const oldCloud = previous?.cloudMonths?.[key];
     const clean = working && oldCloud && working.cloudVersionId === oldCloud.id && sameTransactionSnapshot(working.table.data, oldCloud.rows, key);
     const missing = !working || (!working.table.data.length && working.activity?.lastAction !== 'saved' && working.activity?.lastAction !== 'edited');
-    if (missing || (clean && working.cloudVersionId !== version.id)) {
+    if (matchesMasterDraft || missing || (clean && working.cloudVersionId !== version.id)) {
       const table = {...(working?.table || data.BankExport), data: version.rows};
       const activity: AppData['TransactionActivity'] = {
         generatedAt: version.created_at, lastSavedAt: version.created_at,

@@ -21,7 +21,7 @@ export function conflictingLocalTransactionPeriods(
   for (const [localPeriod, snapshot] of Object.entries(localMonths)) {
     // Generated previews are not confirmed history. The active rows above take
     // precedence over their cache entry, which can lag until month navigation.
-    if (localPeriod >= period || snapshot.activity?.lastAction === 'generated') continue;
+    if (localPeriod >= period || (snapshot.activity?.lastAction === 'generated' && !snapshot.masterDraft)) continue;
     const cloud = cloudMonths.get(localPeriod);
     if (!cloud || !sameTransactionSnapshot(snapshot.table.data, cloud.rows, localPeriod)) {
       conflicts.add(localPeriod);

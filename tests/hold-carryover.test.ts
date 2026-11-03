@@ -6,8 +6,18 @@ import {
   getEligibleHoldRowsForReport,
   getMergedHoldOriginalIndexes,
   mergeDuplicateHoldRows,
+  parsePayrollMonth,
   reconcileHoldTransactionRows,
 } from "../src/app/lib/utils/hold-carryover";
+
+test("cloud ISO months retain October through December and reject invalid month prefixes", () => {
+  for (const month of [10, 11, 12]) {
+    assert.equal(parsePayrollMonth(`2026-${month}`)?.dot, `${month}.2026`);
+    assert.equal(parsePayrollMonth(`2026-${month}-01`)?.dot, `${month}.2026`);
+  }
+  assert.equal(parsePayrollMonth("2026-13"), null);
+  assert.equal(parsePayrollMonth("13.2026"), null);
+});
 
 const transaction = {
   "Tháng phát sinh": "01.2026",

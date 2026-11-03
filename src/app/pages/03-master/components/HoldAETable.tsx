@@ -56,6 +56,7 @@ import { createDeductionsDisplayProjector } from "../../../lib/utils/deductions-
 import { createReconciliationTotalsCalculator } from "../../../lib/utils/reconciliation-sync";
 import { ReconciliationTotalsSummary } from './ReconciliationTotalsSummary';
 import { deductionsRowMonth, isDeductionsMonthLocked } from '../../../lib/utils/deductions-lock';
+import { pendingMasterUpdate, reopenMasterDeductionsMonth } from '../../../lib/utils/master-source-refresh';
 import {
   sortMissingDeductionsSourceNotesFirst,
 } from "../../../lib/utils/deductions-sheet-source";
@@ -115,9 +116,10 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
     const isSearchVisible = showSearch || hasActiveSearch;
     const currentReportMonth =
       parsePayrollMonth(appData.globalMonth || "03.2026")?.dot || "03.2026";
-    const currentHoldSnapshot =
-      appData.HoldCarrySnapshots?.[currentReportMonth];
+    const currentHoldSnapshot = appData.HoldCarrySnapshots?.[currentReportMonth] ||
+      Object.entries(appData.HoldCarrySnapshots || {}).find(([month]) => parsePayrollMonth(month)?.dot === currentReportMonth)?.[1];
     const isCurrentMonthLocked = Boolean(currentHoldSnapshot);
+    const pendingMaster = pendingMasterUpdate(appData, currentReportMonth);
     const calculateTotals = useMemo(
       () => createReconciliationTotalsCalculator(currentReportMonth),
       [currentReportMonth],
@@ -835,7 +837,7 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
       const carriedCount = carryoverPreview.carriedCount;
 
       updateAppData((prev: any) => {
-        if (prev.HoldCarrySnapshots?.[currentReportMonth]) return prev;
+        if (isDeductionsMonthLocked(prev.HoldCarrySnapshots, currentReportMonth)) return prev;
         const holdCarryover = carryEligibleHoldsToNextMonth({
           sourceRows: filteredData.data,
           existingRows: prev.Hold_AE?.data || [],
@@ -895,25 +897,13 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
       );
       const removedCount = sourceRows.length - retainedRows.length;
 
-      updateAppData((prev: any) => {
-        const snapshots = { ...(prev.HoldCarrySnapshots || {}) };
-        delete snapshots[currentReportMonth];
-        return {
-          ...prev,
-          Hold_AE: {
-            ...(prev.Hold_AE || { headers: [], data: [] }),
-            data: removeHoldCarryoverFromReport(
-              prev.Hold_AE?.data || [],
-              currentReportMonth,
-            ),
-          },
-          HoldCarrySnapshots: snapshots,
-        };
-      }, true, true, [], {unlockDeductionsMonth: currentReportMonth});
+      updateAppData(prev => reopenMasterDeductionsMonth(prev, currentReportMonth),
+        true, true, pendingMaster ? ["Hold_AE"] : [], {unlockDeductionsMonth: currentReportMonth});
 
       setShowDeleteSnapshotConfirm(false);
       toast.success(
-        `Đã xóa bản lưu Hold ${currentReportMonth} và ${removedCount} khoản chuyển tiếp.`,
+        pendingMaster ? `Đã mở khóa ${currentReportMonth} và áp dụng nguồn Master mới.`
+          : `Đã xóa bản lưu Hold ${currentReportMonth} và ${removedCount} khoản chuyển tiếp.`,
       );
     };
 
@@ -1100,6 +1090,12 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
           </div>
         </div>
 
+        {pendingMaster && (
+          <p role="status" className="shrink-0 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
+            Có dữ liệu Master mới cho {currentReportMonth}. Bấm Delete Saved Hold để mở khóa và áp dụng.
+          </p>
+        )}
+
           <DataTable
             className="flex-1 !overflow-visible"
             hideColumnVisibilityToggle={false}
@@ -1256,9 +1252,9 @@ export const HoldAETable = forwardRef<any, HoldAETableProps>(
 
             <div className="space-y-4 px-5 py-5">
               <AlertDialogDescription className="text-xs font-medium leading-5 text-muted-foreground">
-                Bản chốt của tháng {currentReportMonth} sẽ được mở khóa. Chỉ các
-                khoản chuyển sang tháng sau do bản lưu này tạo ra bị xóa; dữ liệu
-                gốc của tháng hiện tại vẫn được giữ nguyên.
+                {pendingMaster
+                  ? `Bản chốt ${currentReportMonth} sẽ được mở khóa và áp dụng dữ liệu từ Master mới. Hãy kiểm tra Deduction và Batch Payment trước khi lưu lại.`
+                  : `Bản chốt ${currentReportMonth} sẽ được mở khóa. Các khoản chuyển tiếp do bản lưu này tạo ra sẽ được xóa.`}
               </AlertDialogDescription>
               <div className="flex items-center justify-between rounded-xl border border-border bg-muted/35 px-4 py-3">
                 <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
