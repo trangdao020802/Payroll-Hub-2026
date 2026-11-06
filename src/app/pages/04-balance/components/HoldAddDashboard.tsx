@@ -46,7 +46,7 @@ import {
   SelectValue,
 } from "../../../components/ui/select";
 import { downloadHierarchicalWorkbook } from "../../../lib/utils/excel-export";
-import { calculateTrialBalanceHeaderTotals } from "../../../lib/utils/trial-balance-header-totals";
+import { calculateTrialBalanceHeaderTotals, calculateTrialBalanceInternCost } from "../../../lib/utils/trial-balance-header-totals";
 
 const fmt = (n: number) => {
   const rounded = Math.round(n);
@@ -2729,7 +2729,21 @@ export function HoldAddDashboard() {
                               </tr>
                             );
                             
-                            return [...renderedBuRows, subtotalRow];
+                            const internCost = calculateTrialBalanceInternCost(buRows, mk);
+                            const internCostRow = (
+                              <tr key={`intern-cost-${mk}-${bu}`} className="bg-primary/5 font-bold text-foreground">
+                                <th scope="row" colSpan={3} className="p-2 text-left text-xs">
+                                  Tổng phát sinh CP Intern — {bu} · {trialBalanceRowLabel({ month: mk })}
+                                </th>
+                                <td colSpan={3} />
+                                <td className="p-2 text-right tabular-nums text-xs whitespace-nowrap">
+                                  {fmt(internCost)}
+                                </td>
+                                <td colSpan={2} />
+                              </tr>
+                            );
+
+                            return [...renderedBuRows, subtotalRow, internCostRow];
                           });
                         })()
                       : []),

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { calculateTrialBalanceHeaderTotals } from "../src/app/lib/utils/trial-balance-header-totals";
+import { calculateTrialBalanceHeaderTotals, calculateTrialBalanceInternCost } from "../src/app/lib/utils/trial-balance-header-totals";
 
 test("Trial Balance header totals use business columns, not row labels", () => {
   const totals = calculateTrialBalanceHeaderTotals([
@@ -62,4 +62,25 @@ test("header counts current HOLD, past ADD and current CANCEL after auto approva
   assert.deepEqual(calculateTrialBalanceHeaderTotals(rows, "02.2026"), {
     payrollCost: 13_775_833, hold: 500_000, add: 3_575_833, cancel: 100_000,
   });
+});
+
+test("Intern cost uses earned payroll for the selected month, excluding hold and release movements", () => {
+  const september = "Tháng 9/2026";
+  const rows = [
+    { month: september, thu: "753.821.753" },
+    { month: september, displayMonth: "05.2026", _isOpeningHold: true, thu: 815_500 },
+    { month: september, customMonthDisplay: "Hold lương tháng 09.2026", chi: 1_979_833 },
+    { month: "08.2026", reportMonth: september, customMonthDisplay: "Add lương tháng 08.2026", thu: 2_927_166 },
+    { month: september, id: "09.2026_AHN_cancel", chi: 80_000 },
+    { month: september, id: "09.2026_AHN_add", thu: 200_000 },
+    { month: "09.2025", thu: 200_000 },
+    { month: "10.2026", thu: 300_000 },
+    { month: september, _excludeFromTotals: true, thu: 500_000 },
+  ];
+  assert.equal(calculateTrialBalanceInternCost(rows, "09.2026"), 753_821_753);
+  assert.equal(calculateTrialBalanceInternCost(rows, "10.2026"), 300_000);
+  assert.equal(calculateTrialBalanceInternCost(rows.slice(1, 6), september), 0);
+
+  const legacyBonus = { month: "09.2026", id: "09.2026_AHN_bonus", customMonthDisplay: "Bonus lương tháng 09.2026", thu: 35_000 };
+  assert.equal(calculateTrialBalanceInternCost([...rows, legacyBonus], september), 753_856_753);
 });
