@@ -211,6 +211,10 @@ export function useBulkPaymentLogic() {
   const { Sheet1_AE, SavedGrossPayByMonth } = appData;
   const grossPay = useMemo(() => grossPayReportTable({Sheet1_AE, SavedGrossPayByMonth}, monthPeriod.globalMonth),
     [Sheet1_AE, SavedGrossPayByMonth, monthPeriod.globalMonth]);
+  const grossByBusiness = useMemo(() => {
+    const period = parsePayrollMonth(monthPeriod.globalMonth)?.dot || "";
+    return grossPayTotalsByMonth(grossPay?.data || [], period).get(period) ?? new Map<string, number>();
+  }, [grossPay, monthPeriod.globalMonth]);
 
   // Month string matching helpers
   const monMatchComp = useCallback(
@@ -268,44 +272,18 @@ export function useBulkPaymentLogic() {
 
     const sheet1Rows = grossPay?.data || [];
     
-    let sheet1AhnTotal = 0;
-    let sheet1AhpTotal = 0;
-    let sheet1AthTotal = 0;
-    let sheet1AtnTotal = 0;
-    let sheet1AptTotal = 0;
-    let sheet1OtherTotal = 0;
-
     sheet1Rows.forEach((row) => {
-      const rowMonthRaw = String(row["Tháng báo cáo"] || row["_fileMonth"] || row["Tháng"] || "").trim();
-      const extracted = monMatchComp(rowMonthRaw);
-      if (extracted && extracted !== targetMonthLabelComp) {
-        return;
-      }
-      if (!extracted && rowMonthRaw && !isMonthInStrComp(rowMonthRaw)) {
-        return;
-      }
-      
       const id = String(row["ID Number"] || row["Mã AE"] || row["Mã ae"] || "").trim();
       if (!id) return; // BỎ QUA NẾU TRỐNG ID NUMBER
       const name = removeVietnameseTones(row["Full name"] || row["Beneficiary Name"] || "").toUpperCase();
       const acc = String(row["Bank Account Number"] || row["Beneficiary Account No."] || "").trim();
       
-      let biz = row["Business"] || row["BU"] || "Unknown";
-      if (biz === "AHN_HP") {
-        biz = "AHP";
-      }
+      const biz = normalizeGrossPayBusiness(row.Business || row.BU);
       
       if (id) idToSheet1[id] = biz;
       if (name) nameToSheet1[name] = biz;
       if (acc) accToSheet1[acc] = biz;
 
-      const amount = parseMoneyToNumber(row["TOTAL PAYMENT"] || row["Grand Total"] || row["GRAND TOTAL"] || row["Payment Amount"] || 0);
-      if (biz === "AHN") sheet1AhnTotal += amount;
-      else if (biz === "AHP") sheet1AhpTotal += amount;
-      else if (biz === "ATH") sheet1AthTotal += amount;
-      else if (biz === "ATN") sheet1AtnTotal += amount;
-      else if (biz === "APT") sheet1AptTotal += amount;
-      else sheet1OtherTotal += amount;
     });
 
     const holdRows = appData.Hold_AE?.data || [];
@@ -398,11 +376,13 @@ export function useBulkPaymentLogic() {
     }
     const sortedMonths = Array.from(activeMonths).sort((a, b) => Number(a) - Number(b));
 
-    const ahnT5 = sheet1AhnTotal + holdAhnTotal;
-    const ahpT5 = sheet1AhpTotal + holdAhpTotal;
-    const athT5 = sheet1AthTotal + holdAthTotal;
-    const atnT5 = sheet1AtnTotal + holdAtnTotal;
-    const aptT5 = sheet1AptTotal + holdAptTotal;
+    const ahnT5 = (grossByBusiness.get("AHN") || 0) + holdAhnTotal;
+    const ahpT5 = (grossByBusiness.get("AHP") || 0) + holdAhpTotal;
+    const athT5 = (grossByBusiness.get("ATH") || 0) + holdAthTotal;
+    const atnT5 = (grossByBusiness.get("ATN") || 0) + holdAtnTotal;
+    const aptT5 = (grossByBusiness.get("APT") || 0) + holdAptTotal;
+    const sheet1OtherTotal = [...grossByBusiness].reduce((sum, [business, amount]) =>
+      Object.hasOwn(pivotRows, business) ? sum : sum + amount, 0);
     const otherT5 = sheet1OtherTotal + holdOtherTotal;
 
     const bankNorthT5 = ahnT5 + ahpT5;
@@ -440,7 +420,7 @@ export function useBulkPaymentLogic() {
       crosstabData,
       sortedMonths,
     };
-  }, [appData.Hold_AE.data, grossPay, currentMonthNumComp, currentYearNumComp, isMonthInStrComp, monMatchComp, targetMonthLabelComp]);
+  }, [appData.Hold_AE.data, grossPay, grossByBusiness, currentMonthNumComp, currentYearNumComp]);
 
   // 2. RECONCILE CALCULATION SUMMARY
   const calculationSummary = useMemo(() => {
@@ -465,9 +445,7 @@ export function useBulkPaymentLogic() {
 
   // 3. DYNAMIC REPORT STATS BY BU & HOLD CATEGORY
   const dynamicReportStats = useMemo(() => {
-    const reportMonth = monthPeriod.globalMonth;
-    const grossByBusiness = grossPayTotalsByMonth(grossPay?.data || [], reportMonth).get(parsePayrollMonth(reportMonth)?.dot || "");
-    const sheet1Totals = Object.fromEntries(grossByBusiness || []);
+    const sheet1Totals = Object.fromEntries(grossByBusiness);
 
     const holdAddItems: { month: string; biz: string; reason: string; amount: number; contribution: number; type: 'HOLD' | 'ADD' | 'CANCEL' | 'BONUS' }[] = [];
     appData.Hold_AE.data.forEach((r) => {
@@ -533,7 +511,7 @@ export function useBulkPaymentLogic() {
       diffMonthAddTotal,
       bonusTotal
     };
-  }, [grossPay, monthPeriod.globalMonth, appData.Hold_AE.data, currentMonthNumComp, currentYearNumComp]);
+  }, [grossByBusiness, appData.Hold_AE.data, currentMonthNumComp, currentYearNumComp]);
 
   // 4. REMAINING HOLD BALANCE BY MONTH & BU
   const remainingHoldByMonth = useMemo(() => {

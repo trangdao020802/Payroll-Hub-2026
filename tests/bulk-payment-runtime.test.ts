@@ -50,7 +50,7 @@ test("Batch Payment clears drilldown searches and column filters without resetti
         setData({...getData(), Sheet1_AE: {headers: [], data: []},
           SavedGrossPayByMonth: {'05.2026': {headers: ['TOTAL PAYMENT'], data: [
             {'ID Number': 'TEST-1', 'Tháng báo cáo': '05.2026', Business: 'AHN', 'TOTAL PAYMENT': 1200},
-            {'ID Number': 'TEST-2', 'Tháng báo cáo': '05.2026', Business: 'AHN_HP', 'TOTAL PAYMENT': 50},
+            {'ID Number': 'TEST-2', 'Tháng báo cáo': '2026-05', Business: 'AHN_HP', 'TOTAL PAYMENT': 50},
           ]}},
           Hold_AE: {headers: [], data: [{BU: 'AHN', 'Tháng báo cáo': '05.2026', 'Tháng phát sinh': '05.2026', 'Nghiệp vụ': 'Hold', 'TOTAL PAYMENT': -100}]},
           SavedPeriods_HoldAdd: {[period]: true},
@@ -138,9 +138,10 @@ test("BulkPayment renders adjustment totals for HOLD, ADD, CANCEL and bonus rows
         import { useBulkPaymentLogic } from './src/app/hooks/useBulkPaymentLogic';
         import { setData } from 'test-app-data';
         import { INITIAL_APP_DATA } from './src/app/constants/initial-data';
-        export function calculate(rows) {
+        export function calculate(rows, grossRows = []) {
           setData({ ...INITIAL_APP_DATA, globalMonth: '09.2026', Hold_AE: { headers: [], data: rows },
-            Sheet1_AE: { headers: [], data: [] }, Bank_North_AE: { headers: [], data: [] } });
+            Sheet1_AE: { headers: [], data: [] }, Bank_North_AE: { headers: [], data: [] },
+            SavedGrossPayByMonth: {'09.2026': {headers: [], data: grossRows}} });
           let value;
           function Probe() { value = useBulkPaymentLogic(); return null; }
           renderToString(React.createElement(Probe));
@@ -167,10 +168,10 @@ test("BulkPayment renders adjustment totals for HOLD, ADD, CANCEL and bonus rows
       },
     }],
   });
-  const module = { exports: {} as { calculate: (rows: Record<string, unknown>[]) => {
+  const module = { exports: {} as { calculate: (rows: Record<string, unknown>[], grossRows?: Record<string, unknown>[]) => {
     sameMonthHoldTotal: number; sameMonthAddTotal: number; diffMonthAddTotal: number;
     holdAddItems: { type: string; amount: number }[]; finalTotals: Record<string, number>;
-    calculationSummary: { holdTotal: number; calculatedTotal: number };
+    calculationSummary: { holdTotal: number; calculatedTotal: number; bankNorthTotal: number };
     holdPaymentDetails: { holdAddTotal: number };
   } } };
   new Function("require", "module", "exports", result.outputFiles[0].text)(createRequire(import.meta.url), module, module.exports);
@@ -206,4 +207,11 @@ test("BulkPayment renders adjustment totals for HOLD, ADD, CANCEL and bonus rows
   assert.equal(edited.finalTotals.AHN, 60);
   assert.equal(edited.calculationSummary.calculatedTotal, 60);
   assert.equal(edited.holdPaymentDetails.holdAddTotal, 60);
+
+  const archived = module.exports.calculate([], [
+    {'Tháng báo cáo': '2026-09', 'ID Number': 'TEST-1', Business: 'AHN', 'TOTAL PAYMENT': 100},
+    {'Tháng báo cáo': '2026-09', 'ID Number': 'TEST-2', Business: 'AHN_HP', 'TOTAL PAYMENT': 50},
+  ]);
+  assert.equal(archived.calculationSummary.bankNorthTotal, 150);
+  assert.equal(archived.calculationSummary.calculatedTotal, 150);
 });
