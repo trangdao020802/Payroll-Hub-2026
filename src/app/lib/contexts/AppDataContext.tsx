@@ -47,6 +47,7 @@ const STORAGE_KEY = "PayrollApp_Data";
 const STORAGE_META_KEY = `${STORAGE_KEY}:meta`;
 const SPLIT_STORAGE_FIELDS = [
   "TableOriginals",
+  "SavedGrossPayByMonth",
   "Timesheet_Roster",
   "Master_Roster",
   "Q_Staff",

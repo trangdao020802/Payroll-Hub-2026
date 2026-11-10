@@ -1,4 +1,33 @@
 import { parseMoneyToNumber } from "./data-utils";
+import { parsePayrollMonth } from "./hold-carryover";
+import { payrollRowMonth } from "./payroll-month-rows";
+
+export function normalizeGrossPayBusiness(value: unknown): string {
+  const business = String(value || "").trim().toUpperCase();
+  if (business === "AHN_HP") return "AHP";
+  return business === "UNKNOWN" || !business ? "OTHER" : business;
+}
+
+/** Report totals come from employee rows in Gross Pay, before deductions. */
+export function grossPayTotalsByMonth(rows: readonly Record<string, unknown>[], reportMonth?: string) {
+  const selected = reportMonth === undefined ? undefined : parsePayrollMonth(reportMonth)?.dot;
+  const totals = new Map<string, Map<string, number>>();
+  if (reportMonth !== undefined && !selected) return totals;
+  for (const row of rows) {
+    if (!row || row._isSubtotal || row._isTotalRow ||
+        !String(row["ID Number"] || row.id_number || row["Mã AE"] || row["Mã ae"] || "").trim()) continue;
+    const month = payrollRowMonth(row);
+    if (!month || (selected && month !== selected)) continue;
+    const business = normalizeGrossPayBusiness(row.Business || row.BU);
+    const rawAmount = [row["TOTAL PAYMENT"], row["Payment Amount"], row["Grand Total"], row["GRAND TOTAL"], row["Total Payment"]]
+      .find(value => value != null && String(value).trim() !== "");
+    const amount = parseMoneyToNumber(rawAmount);
+    const monthTotals = totals.get(month) || new Map<string, number>();
+    monthTotals.set(business, (monthTotals.get(business) || 0) + amount);
+    totals.set(month, monthTotals);
+  }
+  return totals;
+}
 
 export const GROSS_PAY_CHARGE_COLUMNS = [
   "CHARGE TO LXO",

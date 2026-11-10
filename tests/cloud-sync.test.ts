@@ -18,12 +18,49 @@ import { restoreSavedTransactionMonths } from '../src/app/lib/utils/transaction-
 import { restoreTableOriginals } from '../src/app/lib/utils/table-originals';
 import type { TransactionVersion } from '../src/app/lib/transaction-history-store';
 import { restoreSavedDeductions } from '../src/app/lib/utils/deductions-lock';
+import { applyLocalTransactionVersions } from '../src/app/lib/utils/transaction-local-history';
+import { grossPayReportTable } from '../src/app/lib/utils/gross-pay-snapshot';
 const asset = (hash: string) => ({ hash, bytes: 10, parts: [hash] });
 const manifest = (fields: Record<string, string>): Manifest => ({
   version: 1,
   fields: Object.fromEntries(
     Object.entries(fields).map(([key, hash]) => [key, asset(hash)]),
   ),
+});
+
+test('Lưu tháng syncs the complete Gross Pay snapshot and Batch Payment to a fresh device', async () => {
+  const h = harness();
+  const month = '09.2026';
+  const gross = {'Tháng báo cáo': month, 'ID Number': 'TEST-1', Business: 'AHN', 'TOTAL PAYMENT': 1_200, 'CHARGE TO LXO': 1_200};
+  const august = {...gross, 'Tháng báo cáo': '08.2026', 'TOTAL PAYMENT': 800};
+  const version: TransactionVersion = {id: '901', period: '2026-09-01', created_at: '2026-10-01T00:00:00Z', rows: [
+    {'Tháng báo cáo': '2026-09', 'Document ID': 'TEST-1', 'Payment Amount': 1_200},
+  ]};
+  const original: AppData = {...structuredClone(INITIAL_APP_DATA), globalMonth: month,
+    Sheet1_AE: {headers: Object.keys(gross), data: [august, gross]}};
+  const deviceA = h.client({...original});
+  await deviceA.engine.start();
+  try {
+    const saved = applyLocalTransactionVersions(original, [version], version.created_at, {type: 'save', table: original.Sheet1_AE});
+    for (const [field, value] of Object.entries(saved)) deviceA.edit(field, value, false);
+    await deviceA.engine.flush();
+    assert.ok(h.server?.manifest.fields.SavedGrossPayByMonth);
+    // A later working import only contains August. September remains available as saved.
+    deviceA.edit('Sheet1_AE', {...original.Sheet1_AE, data: [august]});
+    await deviceA.engine.flush();
+  } finally { deviceA.engine.stop(); }
+
+  h.resetDevice();
+  const deviceB = h.client({...INITIAL_APP_DATA});
+  try {
+    await deviceB.engine.start();
+    const restored = deviceB.data as unknown as AppData;
+    assert.deepEqual(grossPayReportTable(restored, month), {headers: Object.keys(gross), data: [gross]});
+    assert.equal(calculateReconciliationTotals(restored, month).variance, 0);
+    const loaded = applyLocalTransactionVersions(restored, [version], version.created_at, {type: 'restore'});
+    assert.deepEqual(loaded.Sheet1_AE.data, [august, gross]);
+    assert.deepEqual(Object.keys(loaded.SavedGrossPayByMonth || {}), [month]);
+  } finally { deviceB.engine.stop(); }
 });
 test('verified login opens before a slow automatic history upload, while Save still waits for the commit', async () => {
   const h = harness();

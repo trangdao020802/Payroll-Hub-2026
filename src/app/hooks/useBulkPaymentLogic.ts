@@ -11,6 +11,9 @@ import {
 } from "../lib/utils/data-utils";
 import { toast } from "sonner";
 import { classifyHoldOperation } from "../lib/utils/bulk-payment-analytics";
+import { grossPayTotalsByMonth, normalizeGrossPayBusiness } from "../lib/utils/gross-pay";
+import { grossPayReportTable } from "../lib/utils/gross-pay-snapshot";
+import { parsePayrollMonth } from "../lib/utils/hold-carryover";
 import { pendingMasterUpdate } from "../lib/utils/master-source-refresh";
 import {
   commitTransactionEdits,
@@ -205,6 +208,9 @@ export function useBulkPaymentLogic() {
   }, [appData.globalMonth]);
 
   const { targetMonthLabelComp, monthShortStrComp, monthDashStrComp, currentMonthNumComp, currentYearNumComp } = monthPeriod;
+  const { Sheet1_AE, SavedGrossPayByMonth } = appData;
+  const grossPay = useMemo(() => grossPayReportTable({Sheet1_AE, SavedGrossPayByMonth}, monthPeriod.globalMonth),
+    [Sheet1_AE, SavedGrossPayByMonth, monthPeriod.globalMonth]);
 
   // Month string matching helpers
   const monMatchComp = useCallback(
@@ -260,7 +266,7 @@ export function useBulkPaymentLogic() {
     const nameToSheet1: Record<string, string> = {};
     const accToSheet1: Record<string, string> = {};
 
-    const sheet1Rows = appData.Sheet1_AE?.data || [];
+    const sheet1Rows = grossPay?.data || [];
     
     let sheet1AhnTotal = 0;
     let sheet1AhpTotal = 0;
@@ -434,12 +440,12 @@ export function useBulkPaymentLogic() {
       crosstabData,
       sortedMonths,
     };
-  }, [appData.Hold_AE.data, appData.Sheet1_AE.data, currentMonthNumComp, currentYearNumComp, isMonthInStrComp, monMatchComp, targetMonthLabelComp]);
+  }, [appData.Hold_AE.data, grossPay, currentMonthNumComp, currentYearNumComp, isMonthInStrComp, monMatchComp, targetMonthLabelComp]);
 
   // 2. RECONCILE CALCULATION SUMMARY
   const calculationSummary = useMemo(() => {
     const totals = calculateReconciliationTotals({
-      Sheet1_AE: appData.Sheet1_AE, Hold_AE: appData.Hold_AE,
+      Sheet1_AE: appData.Sheet1_AE, SavedGrossPayByMonth: appData.SavedGrossPayByMonth, Hold_AE: appData.Hold_AE,
       Bank_North_AE: appData.Bank_North_AE, BankExport: appData.BankExport,
       TransactionActivity: appData.TransactionActivity,
       TransactionMonthCache: appData.TransactionMonthCache,
@@ -454,35 +460,24 @@ export function useBulkPaymentLogic() {
       diff: -totals.variance,
       aeTotal: totals.actual,
     };
-  }, [appData.Sheet1_AE, appData.Hold_AE, appData.Bank_North_AE, appData.BankExport,
+  }, [appData.Sheet1_AE, appData.SavedGrossPayByMonth, appData.Hold_AE, appData.Bank_North_AE, appData.BankExport,
     appData.TransactionActivity, appData.TransactionMonthCache, appData.globalMonth, holdPaymentDetails.bankNorthT5]);
 
   // 3. DYNAMIC REPORT STATS BY BU & HOLD CATEGORY
   const dynamicReportStats = useMemo(() => {
-    const sheet1Totals: Record<string, number> = {};
-    appData.Sheet1_AE.data.forEach((r) => {
-      const id = String(r["ID Number"] || r["Mã AE"] || r["Mã ae"] || "").trim();
-      if (!id) return; // BỎ QUA NẾU TRỐNG ID NUMBER
-      const rowMonthStr = String(r["Tháng báo cáo"] || r["_fileMonth"] || r["Tháng"] || r["Month"] || "").trim();
-      const extracted = monMatchComp(rowMonthStr);
-      if (extracted && extracted !== targetMonthLabelComp) return;
-      if (!extracted && rowMonthStr && !isMonthInStrComp(rowMonthStr)) return;
-
-      let biz = r["Business"] || r["BU"] || "Unknown";
-      if (biz === "AHN_HP") biz = "AHP";
-      const amount = parseMoneyToNumber(r["TOTAL PAYMENT"] || r["Payment Amount"] || r["Grand Total"] || r["GRAND TOTAL"] || r["Total Payment"] || 0);
-      sheet1Totals[biz] = (sheet1Totals[biz] || 0) + amount;
-    });
+    const reportMonth = monthPeriod.globalMonth;
+    const grossByBusiness = grossPayTotalsByMonth(grossPay?.data || [], reportMonth).get(parsePayrollMonth(reportMonth)?.dot || "");
+    const sheet1Totals = Object.fromEntries(grossByBusiness || []);
 
     const holdAddItems: { month: string; biz: string; reason: string; amount: number; contribution: number; type: 'HOLD' | 'ADD' | 'CANCEL' | 'BONUS' }[] = [];
     appData.Hold_AE.data.forEach((r) => {
       const entry = getDeductionReportEntry(r, `${currentMonthNumComp}.${currentYearNumComp}`);
       if (!entry) return;
       if (entry.amount !== 0) {
-        let biz = r["BU"] || r["Business"] || "Unknown";
-        if (biz === "AHN_HP") biz = "AHP";
+        const declaredBusiness = r["BU"] || r["Business"];
+        let biz = normalizeGrossPayBusiness(declaredBusiness);
 
-        if (biz === "Unknown" || !biz || biz === "UNKNOWN") {
+        if (!declaredBusiness || /^UNKNOWN$/i.test(String(declaredBusiness).trim())) {
           const textToMatch = [ r["Sheet Source"], r["CENTER NOTE"], r["Center"], r["Center Code"], r["L07"], r["Mã ae"], r["Note"], r["Full name"] ]
             .map(v => String(v || "").toUpperCase()).join(" ");
           if (textToMatch.includes("AHP") || textToMatch.includes("HAIPHONG") || textToMatch.includes("HAI PHONG")) biz = "AHP";
@@ -504,15 +499,7 @@ export function useBulkPaymentLogic() {
       }
     });
 
-    const finalTotals: Record<string, number> = {};
-    const buList = ["AHN", "AHP", "ATH", "ATN", "APT", "OTHER"];
-    buList.forEach(bu => {
-      finalTotals[bu] = sheet1Totals[bu] || 0;
-    });
-
-    if (sheet1Totals["Unknown"]) {
-      finalTotals["AHN"] = (finalTotals["AHN"] || 0) + sheet1Totals["Unknown"];
-    }
+    const finalTotals: Record<string, number> = { ...sheet1Totals };
 
     let sameMonthHoldTotal = 0;
     let sameMonthAddTotal = 0;
@@ -526,11 +513,6 @@ export function useBulkPaymentLogic() {
       
       finalTotals[item.biz] += item.contribution;
     });
-
-    if (finalTotals["Unknown"]) {
-      finalTotals["AHN"] = (finalTotals["AHN"] || 0) + finalTotals["Unknown"];
-      delete finalTotals["Unknown"];
-    }
 
     appData.Hold_AE.data.forEach((row) => {
       const entry = getDeductionReportEntry(row, `${currentMonthNumComp}.${currentYearNumComp}`);
@@ -551,7 +533,7 @@ export function useBulkPaymentLogic() {
       diffMonthAddTotal,
       bonusTotal
     };
-  }, [appData.Sheet1_AE.data, appData.Hold_AE.data, currentMonthNumComp, currentYearNumComp, isMonthInStrComp, monMatchComp, targetMonthLabelComp]);
+  }, [grossPay, monthPeriod.globalMonth, appData.Hold_AE.data, currentMonthNumComp, currentYearNumComp]);
 
   // 4. REMAINING HOLD BALANCE BY MONTH & BU
   const remainingHoldByMonth = useMemo(() => {
@@ -1185,6 +1167,7 @@ LỆCH ACC & AE:\t${formatMoneyVND(calculationSummary.diff).replace(" ₫", "")}
   return {
     // Data & Calculations
     globalMonth: appData.globalMonth || "03.2026",
+    grossPay,
     monthPeriod,
     holdPaymentDetails,
     calculationSummary,

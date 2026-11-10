@@ -148,6 +148,34 @@ export function omitPivotMonths(data: PivotGroupedData, months: readonly string[
   return result;
 }
 
+export function replacePivotCacheMonth(current: PivotGroupedData, rebuilt: PivotGroupedData, month: string): PivotGroupedData {
+  const restored = getPivotDataMonths(rebuilt);
+  if (!restored.includes(month)) return current;
+  const result = omitPivotMonths(current, [month]);
+  const selected = omitPivotMonths(rebuilt, restored.filter(value => value !== month));
+  for (const [bu, centers] of Object.entries(selected)) {
+    const target = result[bu] ??= {};
+    for (const [l07, periods] of Object.entries(centers)) {
+      target[l07] = {...target[l07], ...periods};
+    }
+  }
+  return result;
+}
+
+export function requestPivotCacheMonthReset(month: string): void {
+  try {
+    const raw = localStorage.getItem('pivot_master_processed_data');
+    if (!raw) return;
+    const cache = JSON.parse(raw);
+    if (cache?.cacheVersion === PIVOT_CACHE_VERSION) {
+      const pending = Array.isArray(cache.resetMonths) ? cache.resetMonths : [];
+      localStorage.setItem('pivot_master_processed_data', JSON.stringify({...cache, resetMonths: [...new Set([...pending, month])]}));
+    }
+  } catch {
+    // A missing/invalid cache is rebuilt from Master when Pivot opens.
+  }
+}
+
 export function getMasterRosterMonth(row: Record<string, unknown>, reportingMonth: string): string {
   return normalizePivotMonth(row._fileMonth || row.month || row["Tháng báo cáo"] || row["Tháng"] || reportingMonth);
 }

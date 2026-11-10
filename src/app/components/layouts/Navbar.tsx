@@ -78,9 +78,11 @@ const pageTabs: Record<string, { id: string; label: string; icon: React.ElementT
 
 interface NavbarProps {
   onOpenSettings: () => void;
+  onResetTables: () => void;
+  resetDisabled: boolean;
 }
 
-export function Navbar({ onOpenSettings }: NavbarProps) {
+export function Navbar({ onOpenSettings, onResetTables, resetDisabled }: NavbarProps) {
   const location = useLocation();
   const cloud = useCloudWorkspace();
   const { appData, updateAppData } = useAppData();
@@ -315,6 +317,17 @@ export function Navbar({ onOpenSettings }: NavbarProps) {
               )}
 
               {/* Recent Data Changes History & Integrated Restore Copy Toggle */}
+              <button
+                type="button"
+                onClick={onResetTables}
+                disabled={resetDisabled}
+                aria-label="Reset tất cả bảng"
+                title={`Reset tất cả bảng của tháng ${currentMonth}`}
+                className="inline-flex shrink-0 items-center gap-1 rounded-full border border-primary/20 px-2 py-1 text-[10px] text-primary whitespace-nowrap hover:bg-primary/5 active:scale-[0.98] disabled:opacity-50"
+              >
+                <RefreshCw className="h-3 w-3" aria-hidden="true" />
+                <span className="max-md:hidden">Reset tất cả</span>
+              </button>
               <CloudSyncButton />
               <DataChangeHistoryToggle />
           </div>

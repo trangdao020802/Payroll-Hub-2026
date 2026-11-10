@@ -8,7 +8,9 @@ test("Batch Payment clears drilldown searches and column filters without resetti
     stdin: {contents: `
       import React from 'react';
       import { renderToString } from 'react-dom/server';
+      import { MemoryRouter } from 'react-router';
       import { BulkPayment } from './src/app/pages/04-balance/BulkPayment';
+      import { HoldAddDashboard } from './src/app/pages/04-balance/components/HoldAddDashboard';
       import { INITIAL_APP_DATA } from './src/app/constants/initial-data';
       import { buttons } from 'test-react-capture';
       import { setData, getData } from 'test-app-data';
@@ -41,9 +43,25 @@ test("Batch Payment clears drilldown searches and column filters without resetti
         query = 'WRONG-ID-FROM-RECONCILE';
         render();
         historyState.props.onApplyVersions([{id: '12', period: '2026-05-01', created_at: '2026-10-28T03:00:00Z', rows: getData().BankExport.data}]);
-        return {html, afterSearch, afterFilters, afterCorrection: {query, clears: tableState.clears,
+        const afterCorrection = {query, clears: tableState.clears,
           month: getData().globalMonth, rows: getData().BankExport.data.length,
-          originalId: getData().TableOriginals.BankExportByMonth['2026-05'].data[0]['Document ID']}};
+          originalId: getData().TableOriginals.BankExportByMonth['2026-05'].data[0]['Document ID']};
+        const period = 'Tháng 5/2026';
+        setData({...getData(), Sheet1_AE: {headers: [], data: []},
+          SavedGrossPayByMonth: {'05.2026': {headers: ['TOTAL PAYMENT'], data: [
+            {'ID Number': 'TEST-1', 'Tháng báo cáo': '05.2026', Business: 'AHN', 'TOTAL PAYMENT': 1200},
+            {'ID Number': 'TEST-2', 'Tháng báo cáo': '05.2026', Business: 'AHN_HP', 'TOTAL PAYMENT': 50},
+          ]}},
+          Hold_AE: {headers: [], data: [{BU: 'AHN', 'Tháng báo cáo': '05.2026', 'Tháng phát sinh': '05.2026', 'Nghiệp vụ': 'Hold', 'TOTAL PAYMENT': -100}]},
+          SavedPeriods_HoldAdd: {[period]: true},
+          SavedRows_HoldAdd: {[period]: [
+            {id: 'base', bu: 'AHN', month: period, reportMonth: period, thu: 777, chi: 0},
+            {id: 'detail_hold', bu: 'AHN', month: period, reportMonth: period, customMonthDisplay: 'Hold lương tháng 05.2026', thu: 0, chi: 100, rawHold: 100},
+          ]},
+        });
+        const summaryHtml = render();
+        const balanceHtml = renderToString(React.createElement(MemoryRouter, null, React.createElement(HoldAddDashboard)));
+        return {html, afterSearch, afterFilters, afterCorrection, summaryHtml, balanceHtml};
       }
     `, resolveDir: process.cwd()},
     bundle: true, write: false, platform: "node", format: "cjs", packages: "external",
@@ -95,7 +113,7 @@ test("Batch Payment clears drilldown searches and column filters without resetti
     }}],
   });
   const module = {exports: {} as {run: () => {
-    html: string; afterSearch: {query: string; clears: number; unchanged: boolean};
+    html: string; summaryHtml: string; balanceHtml: string; afterSearch: {query: string; clears: number; unchanged: boolean};
     afterFilters: {query: string; clears: number; unchanged: boolean};
     afterCorrection: {query: string; clears: number; month: string; rows: number; originalId: string};
   }}};
@@ -106,6 +124,9 @@ test("Batch Payment clears drilldown searches and column filters without resetti
   assert.deepEqual(actual.afterSearch, {query: "", clears: 0, unchanged: true});
   assert.deepEqual(actual.afterFilters, {query: "", clears: 1, unchanged: true});
   assert.deepEqual(actual.afterCorrection, {query: "", clears: 2, month: "05.2026", rows: 2, originalId: "FIXED-ID"});
+  assert.match(actual.summaryHtml, /GROSS PAY<\/span><span[^>]*>1\.250<\/span>/);
+  assert.match(actual.summaryHtml, /NET PAY<\/span><span[^>]*>1\.150<\/span>/);
+  assert.match(actual.balanceHtml, /Tổng phát sinh CP Intern[\s\S]*?>1\.200<\/td>[\s\S]*?<\/tr><tr[^>]*data-trial-detail="true"[^>]*><td[^>]*>1\.1<\/td>/);
 });
 
 test("BulkPayment renders adjustment totals for HOLD, ADD, CANCEL and bonus rows", async () => {

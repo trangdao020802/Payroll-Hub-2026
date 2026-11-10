@@ -43,6 +43,7 @@ import {
   normalizePivotMonth,
   omitPivotMonths,
   readPivotMktTypeCache,
+  replacePivotCacheMonth,
   PIVOT_CACHE_VERSION,
   updatePivotMktTypeCache,
   writePivotMktTypeCache,
@@ -1086,17 +1087,19 @@ export function PivotSheet() {
     const cachedStr = restoreOriginal ? null : localStorage.getItem("pivot_master_processed_data");
     let cachedGroupedData: PivotGroupedData = {};
     let cachedTypeColumns: string[] = [];
+    let resetMonths: string[] = [];
     if (cachedStr) {
       try {
         const parsed = JSON.parse(cachedStr);
         if (parsed.cacheVersion === PIVOT_CACHE_VERSION) {
           cachedGroupedData = parsed.groupedData || {};
+          resetMonths = Array.isArray(parsed.resetMonths) ? parsed.resetMonths : [];
           cachedTypeColumns = Array.isArray(parsed.typeColumns)
             ? parsed.typeColumns
             : [];
         }
         if (
-          !showToastMsg &&
+          !showToastMsg && resetMonths.length === 0 &&
           parsed.cacheVersion === PIVOT_CACHE_VERSION &&
           parsed.reportingMonth === (appData.globalMonth || "03.2026") &&
           parsed.groupedData &&
@@ -1166,18 +1169,21 @@ export function PivotSheet() {
             rosterResult.groupedData || {},
             rosterResult.typeColumns || [],
             getPivotDataMonths(rosterResult.groupedData || {}).filter(month =>
-              restoreOriginal || !mktTypeCache.manualMonths?.includes(month),
+              resetMonths.length ? resetMonths.includes(month) : restoreOriginal || !mktTypeCache.manualMonths?.includes(month),
             ),
           );
           writePivotMktTypeCache(mktTypeCache);
         }
 
-        const restoredGroupedData = applyPivotMktTypeCache(
+        const rebuiltGroupedData = applyPivotMktTypeCache(
           baseResult.groupedData || {},
           mktTypeCache,
         );
+        const restoredGroupedData = resetMonths.length
+          ? resetMonths.reduce((current, month) => replacePivotCacheMonth(current, rebuiltGroupedData, month), cachedGroupedData)
+          : rebuiltGroupedData;
         const restoredTypeColumns = mergePivotTypeColumns(
-          baseResult.typeColumns || [],
+          resetMonths.length ? [...cachedTypeColumns, ...(baseResult.typeColumns || [])] : baseResult.typeColumns || [],
           mktTypeCache.typeColumns,
         );
 
@@ -1255,7 +1261,7 @@ export function PivotSheet() {
             currentMktTypeCache,
             res?.mktGroupedData || {},
             res?.mktTypeColumns || [],
-            res?.mktMonths || [],
+            resetMonths.length ? (res?.mktMonths || []).filter(month => resetMonths.includes(month)) : res?.mktMonths || [],
           );
           writePivotMktTypeCache(nextMktTypeCache);
         }
@@ -1301,12 +1307,15 @@ export function PivotSheet() {
           cachedGroupedData,
           cachedTypeColumns,
         );
-        const restoredGroupedData = applyPivotMktTypeCache(
+        const rebuiltGroupedData = applyPivotMktTypeCache(
           resGrouped,
           mktTypeCache,
         );
+        const restoredGroupedData = resetMonths.length
+          ? resetMonths.reduce((current, month) => replacePivotCacheMonth(current, rebuiltGroupedData, month), cachedGroupedData)
+          : rebuiltGroupedData;
         const restoredTypeColumns = mergePivotTypeColumns(
-          resTypes,
+          resetMonths.length ? [...cachedTypeColumns, ...resTypes] : resTypes,
           mktTypeCache.typeColumns,
         );
 

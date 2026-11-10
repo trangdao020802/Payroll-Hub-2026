@@ -47,6 +47,8 @@ import {
 } from "../../../components/ui/select";
 import { downloadHierarchicalWorkbook } from "../../../lib/utils/excel-export";
 import { calculateTrialBalanceHeaderTotals } from "../../../lib/utils/trial-balance-header-totals";
+import { grossPayTotalsByMonth, normalizeGrossPayBusiness } from "../../../lib/utils/gross-pay";
+import { parsePayrollMonth } from "../../../lib/utils/hold-carryover";
 
 const fmt = (n: number) => {
   const rounded = Math.round(n);
@@ -1744,6 +1746,15 @@ export function HoldAddDashboard() {
   const monthKeys = useMemo(() => {
     return [...grouped.keys()].sort((a, b) => getMonthNum(b) - getMonthNum(a));
   }, [grouped, getMonthNum]);
+  const grossPayByMonth = useMemo(() => {
+    const totals = grossPayTotalsByMonth(appData.Sheet1_AE.data);
+    for (const [month, saved] of Object.entries(appData.SavedGrossPayByMonth || {})) {
+      if (totals.has(month)) continue;
+      const savedTotals = grossPayTotalsByMonth(saved.data, month).get(month);
+      if (savedTotals) totals.set(month, savedTotals);
+    }
+    return totals;
+  }, [appData.Sheet1_AE.data, appData.SavedGrossPayByMonth]);
 
   const allOpen =
     monthKeys.length > 0 && monthKeys.every((k) => expanded.has(k));
@@ -2729,7 +2740,24 @@ export function HoldAddDashboard() {
                               </tr>
                             );
                             
-                            return [...renderedBuRows, subtotalRow];
+                            const firstDetail = buRows.findIndex(row => Boolean(row.customMonthDisplay));
+                            const insertAt = firstDetail < 0 ? renderedBuRows.length : firstDetail;
+                            const grossTotals = grossPayByMonth.get(parsePayrollMonth(mk)?.dot || "");
+                            const grossPayRow = (
+                              <tr key={`gross-pay-${mk}-${bu}`} className="bg-primary/5 font-bold text-foreground">
+                                <td className="border-b border-border" />
+                                <th scope="row" className="border-b border-border px-3 py-2 text-left text-xs whitespace-nowrap">
+                                  Tổng phát sinh CP Intern
+                                </th>
+                                <td className="border-b border-border p-2 text-center text-xs">{bu}</td>
+                                <td colSpan={3} className="border-b border-border" />
+                                <td className="border-b border-border p-2 text-right tabular-nums text-xs whitespace-nowrap">
+                                  {grossTotals ? fmt(grossTotals.get(normalizeGrossPayBusiness(bu)) || 0) : "—"}
+                                </td>
+                                <td colSpan={2} className="border-b border-border" />
+                              </tr>
+                            );
+                            return [...renderedBuRows.slice(0, insertAt), grossPayRow, ...renderedBuRows.slice(insertAt), subtotalRow];
                           });
                         })()
                       : []),

@@ -1,22 +1,24 @@
 import { useCloudWorkspace } from '../../../lib/contexts/CloudWorkspaceContext';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { supabase, isSupabaseConfigured } from '../../../../lib/supabaseClient';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../../../components/ui/dialog';
 import { HistorySaveConflictError, loadLatestVersion, loadTransactionCheckSource, replaceTransactionVersionsAtomically, saveVersion, type TransactionCheckSource, type TransactionVersion } from '../../../lib/transaction-history-store';
 import { compareAccountsAcrossHistory, formatHistoryDate, selectPeriodRows, visibleHistoricalComparisons, type TransactionRow, type HistoricalAccountComparison } from '../../../lib/utils/transaction-history';
 import { formatResolutionPeriods, type TransactionHistoryResolutionField } from '../../../lib/utils/transaction-history-resolution';
 import { sameTransactionSnapshot } from '../../../lib/utils/transaction-snapshot';
-import { conflictingLocalTransactionPeriods, type LocalTransactionMonths } from '../../../lib/utils/transaction-local-history';
+import { conflictingLocalTransactionPeriods, type GrossPayHistoryAction, type LocalTransactionMonths } from '../../../lib/utils/transaction-local-history';
 import { createIdentityResolutionBuilder, IDENTITY_FIELDS, identityResolutionTargets, planIdentityResolution } from '../../../lib/utils/transaction-identity-resolution';
 import { syncTransactionEmployeesToSupabase } from '../../../lib/utils/transaction-employee-sync';
 import { TransactionHistoryTable } from './TransactionHistoryTable';
+import type { TableData } from '../../../types';
 
 interface Props {
   rows: TransactionRow[];
+  grossPay?: TableData;
   month: string;
   showReport: boolean;
   onOpenReport: () => void;
-  onApplyVersions: (versions: TransactionVersion[]) => void;
+  onApplyVersions: (versions: TransactionVersion[], grossPay?: GrossPayHistoryAction) => void;
   localMonths?: LocalTransactionMonths;
   hasPendingEdits: boolean;
   masterUpdatePending?: boolean;
@@ -46,7 +48,7 @@ const markedDocumentId = (value: string, syncNote: string) => (
   value ? `${value}${syncNote ? '!' : ''}` : '—'
 );
 
-export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport, onApplyVersions, localMonths, hasPendingEdits, masterUpdatePending, syncRevision = 0, onReportStateChange }: Props) {
+export function TransactionHistoryPanel({ rows, grossPay, month, showReport, onOpenReport, onApplyVersions, localMonths, hasPendingEdits, masterUpdatePending, syncRevision = 0, onReportStateChange }: Props) {
   const cloud = useCloudWorkspace();
   const [userId, setUserId] = useState('');
   const [email, setEmail] = useState('');
@@ -64,9 +66,12 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
   const retry = useRef<{context: object; requestId: string} | null>(null);
   // AppData updates are immutable. Include retained months so a history edit
   // also invalidates reports and in-flight reads without serializing every row.
-  const context = useMemo(() => ({month, rows, userId, hasPendingEdits, masterUpdatePending, defaultBank, syncRevision, localMonths}), [month, rows, userId, hasPendingEdits, masterUpdatePending, defaultBank, syncRevision, localMonths]);
-  const currentContext = useRef(context);
-  useEffect(() => { currentContext.current = context; }, [context]);
+  const context = useMemo(() => ({month, rows, grossPay, userId, hasPendingEdits, masterUpdatePending, defaultBank, syncRevision, localMonths}), [month, rows, grossPay, userId, hasPendingEdits, masterUpdatePending, defaultBank, syncRevision, localMonths]);
+  const currentContext = useRef<typeof context | null>(context);
+  useLayoutEffect(() => {
+    currentContext.current = context;
+    return () => { currentContext.current = null; };
+  }, [context]);
   useEffect(() => {
     const openSettings = () => setSettingsOpen(true);
     window.addEventListener('open-transaction-settings', openSettings);
@@ -157,29 +162,31 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
     const started = context;
     const operationOwner = authIdentity.current;
     let savedMonthId: string | null = null;
-    const stillViewingMonth = () => currentContext.current.month === month && authIdentity.current === operationOwner;
+    const stillViewingMonth = () => currentContext.current?.month === month && authIdentity.current === operationOwner;
     try {
       if (!isSupabaseConfigured()) throw new Error('Chưa cấu hình Supabase URL và publishable/anon key.');
       if (action === 'save') {
+        if (!cloud?.authenticated) throw new Error('Đăng nhập để đồng bộ cả Batch Payment và Gross Pay.');
         const selected = selectPeriodRows(rows, month);
         if (!selected.length) throw new Error('Tháng này không có dòng chi để lưu vào lịch sử Batch Payment. Dùng Đồng bộ ngay để lưu bản làm việc.');
         if (retry.current?.context !== started) retry.current = {context: started, requestId: crypto.randomUUID()};
         const id = await saveVersion(supabase, month, selected, retry.current.requestId);
+        savedMonthId = id;
         retry.current = null;
         const latest = await loadLatestVersion(supabase, month);
         if (!latest || latest.id !== id) throw new HistorySaveConflictError('Tháng vừa có phiên bản mới hơn trên Supabase. Bấm Check STK & ID để lấy dữ liệu mới nhất.');
         if (!sameTransactionSnapshot(selected, latest.rows, month)) throw new HistorySaveConflictError('Dữ liệu đọc lại từ Supabase chưa khớp Transaction vừa lưu. Bấm Lưu tháng lại trước khi Check STK & ID.');
         requireUnchangedContext(started);
-        savedMonthId = id;
-        onApplyVersions([latest]);
-        // Monthly Transaction and the complete working data must both be durable.
-        if (cloud?.authenticated) await cloud.flush();
+        onApplyVersions([latest], {type: 'save', table: grossPay});
+        // Confirm only after the complete monthly Gross Pay snapshot is durable.
+        await cloud.flush();
         let employeeMessage: string;
         try { employeeMessage = employeeSyncMessage(await syncTransactionEmployeesToSupabase(supabase, latest.rows)); }
         catch (error) { employeeMessage = `Tháng đã lưu; danh mục nhân viên chưa cập nhật: ${error instanceof Error ? error.message : 'Lỗi kết nối'}`; }
         if (stillViewingMonth()) {
           setReport(null);
-          setMessage(`Đã lưu tháng ${month} lên Supabase: ${selected.length} dòng (#${id}). ${employeeMessage} Check STK & ID sẽ tải lại phiên bản mới nhất.`);
+          const grossPayMessage = grossPay ? `Đã lưu Gross Pay (${grossPay.data.length} dòng).` : 'Chưa có dữ liệu Gross Pay cho tháng này.';
+          setMessage(`Đã lưu Batch Payment tháng ${month} (${selected.length} dòng, #${id}). ${grossPayMessage} ${employeeMessage} Check STK & ID sẽ tải lại phiên bản mới nhất.`);
         }
       } else if (action === 'load') {
         const latest = await loadLatestVersion(supabase, month);
@@ -188,7 +195,7 @@ export function TransactionHistoryPanel({ rows, month, showReport, onOpenReport,
         if (localMonths?.[latest.period.slice(0, 7)]?.masterDraft && !sameTransactionSnapshot(rows, latest.rows, month)) {
           throw new Error('Batch Payment có dữ liệu Master mới. Kiểm tra và bấm Lưu tháng để cập nhật bản Supabase.');
         }
-        onApplyVersions([latest]);
+        onApplyVersions([latest], {type: 'restore'});
         if (cloud?.authenticated) await cloud.flush();
         if (stillViewingMonth()) setMessage(`Đã tải tháng ${month} từ Supabase (#${latest.id}). Bấm Check STK & ID để đối chiếu.`);
       } else if (await refreshReport(started)) {

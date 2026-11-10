@@ -46,6 +46,8 @@ export interface AppData {
   Final_AE: TableData;
   Bank_North_AE: TableData;
   Sheet1_AE: TableData;
+  /** Complete Gross Pay tables saved with Batch Payment, indexed by MM.YYYY. */
+  SavedGrossPayByMonth?: Record<string, TableData>;
   Hold_AE: TableData;
   Hold_AE_Source?: TableData;
   SoSanh_AE: TableData;

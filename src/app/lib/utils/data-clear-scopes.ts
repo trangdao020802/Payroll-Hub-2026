@@ -16,6 +16,7 @@ export function clearMasterTableData(
   return {
     ...previous,
     [table]: emptyTable(previous[table]),
+    ...(table === "Sheet1_AE" ? { SavedGrossPayByMonth: {} } : {}),
     ...(table === "Hold_AE" ? { HoldCarrySnapshots: {} } : {}),
     ...(table === "BankExport" ? { ReconciliationByMonth: {}, TransactionMonthCache: undefined, TransactionHistoryRestoreDisabled: true } : {}),
     updatedAt: new Date().toISOString(),
@@ -28,6 +29,7 @@ export function clearMasterPageData(previous: AppData): AppData {
     Ae_Global_Inputs: [],
     Final_AE: emptyTable(previous.Final_AE),
     Sheet1_AE: emptyTable(previous.Sheet1_AE),
+    SavedGrossPayByMonth: {},
     Hold_AE: emptyTable(previous.Hold_AE),
     Bank_North_AE: emptyTable(previous.Bank_North_AE),
     SoSanh_AE: emptyTable(previous.SoSanh_AE),

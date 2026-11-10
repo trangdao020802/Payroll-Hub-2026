@@ -114,7 +114,7 @@ import { DataTable, isAhpBuValue, type DataTableRef } from "../../components/Dat
 import { BulkPaymentAnalytics } from "./components/BulkPaymentAnalytics";
 import { buildBulkPaymentAnalytics, parseMonthPeriod } from "../../lib/utils/bulk-payment-analytics";
 import { markTransactionSaved } from "../../lib/utils/transaction-activity";
-import { applyLocalTransactionVersions } from "../../lib/utils/transaction-local-history";
+import { applyLocalTransactionVersions, type GrossPayHistoryAction } from "../../lib/utils/transaction-local-history";
 import type { TransactionVersion } from "../../lib/transaction-history-store";
 import {
   applyBulkReconciliationReferenceSync,
@@ -276,6 +276,7 @@ export function BulkPayment({
 
   const {
     globalMonth,
+    grossPay,
     monthPeriod,
     holdPaymentDetails,
     calculationSummary,
@@ -741,8 +742,8 @@ export function BulkPayment({
   );
 
   const handleApplyTransactionHistoryVersions = useCallback(
-    (versions: TransactionVersion[]) => {
-      updateAppData((prev) => applyLocalTransactionVersions(prev, versions), true, true);
+    (versions: TransactionVersion[], grossPayAction?: GrossPayHistoryAction) => {
+      updateAppData((prev) => applyLocalTransactionVersions(prev, versions, undefined, grossPayAction), true, true);
       if (versions.length) handleClearTransactionFilters();
     },
     [updateAppData, handleClearTransactionFilters],
@@ -750,7 +751,7 @@ export function BulkPayment({
 
   const displayBankExportData = useMemo(() => {
     const rows = bankExportData || [];
-    const sheet1Rows = appData.Sheet1_AE?.data || [];
+    const sheet1Rows = grossPay?.data || [];
     const holdRows = appData.Hold_AE?.data || [];
 
     return rows.map((row: any) => {
@@ -793,7 +794,7 @@ export function BulkPayment({
       }
       return canonical;
     });
-  }, [bankExportData, appData.Sheet1_AE?.data, appData.Hold_AE?.data]);
+  }, [bankExportData, grossPay, appData.Hold_AE?.data]);
 
   const reconciliationNeedsSync = useMemo(() => {
     const transactionRows = (bankExportData || []).length > 0
@@ -816,8 +817,11 @@ export function BulkPayment({
       return null;
     }
 
+    const workingGrossRows = appData.Sheet1_AE.data;
+    const grossRows = grossPay && !workingGrossRows.includes(grossPay.data[0])
+      ? [...grossPay.data, ...workingGrossRows] : workingGrossRows;
     return buildBulkPaymentAnalytics({
-      sheet1Rows: appData.Sheet1_AE?.data || [],
+      sheet1Rows: grossRows,
       holdRows: appData.Hold_AE?.data || [],
       bankRows:
         appData.BankExport?.data?.length > 0
@@ -831,6 +835,7 @@ export function BulkPayment({
     appData.Hold_AE?.data,
     appData.globalMonth,
     appData.Sheet1_AE?.data,
+    grossPay,
     displayBankExportData.length,
     rightPanelTab,
   ]);
@@ -886,10 +891,10 @@ export function BulkPayment({
       appData.BankExport?.data?.length > 0
         ? appData.BankExport.data
         : appData.Bank_North_AE?.data || [];
-    const sheet1Rows = appData.Sheet1_AE?.data || [];
+    const sheet1Rows = grossPay?.data || [];
     const holdRows = appData.Hold_AE?.data || [];
     const transactionReferencePlan = buildTransactionReferenceSyncPlan({
-      grossRows: sheet1Rows,
+      grossRows: appData.Sheet1_AE.data,
       deductionRows: holdRows,
       transactionRows: bankExportRows,
       // Reconciliation Process Sync uses confirmed Batch Payment as the
@@ -910,13 +915,6 @@ export function BulkPayment({
     const matchedHoldRows = new Set<any>();
 
     sheet1Rows.forEach((r: any) => {
-      const rowMonthStr = String(
-        r["Tháng báo cáo"] || r["_fileMonth"] || r["Tháng"] || r["Month"] || "",
-      ).trim();
-      const extracted = monMatchComp(rowMonthStr);
-      if (extracted && extracted !== targetMonthLabelComp) return;
-      if (!extracted && rowMonthStr && !isMonthInStrComp(rowMonthStr)) return;
-
       const id = String(
         r["ID Number"] ||
           r["Mã AE"] ||
@@ -1599,11 +1597,10 @@ export function BulkPayment({
     appData.BankExport?.data,
     appData.Bank_North_AE?.data,
     appData.Sheet1_AE?.data,
+    grossPay,
     appData.Hold_AE?.data,
-    appData.Q_Staff,
     appData.globalMonth,
     dynamicReportStats,
-    appData.Timesheet_Roster,
     calculationSummary,
     targetMonthLabelComp,
     monMatchComp,
@@ -2066,11 +2063,10 @@ export function BulkPayment({
                               Chọn phạm vi báo cáo
                             </DropdownMenuLabel>
                             <DropdownMenuSeparator className="bg-primary/10" />
-                            {["ALL", "AHN", "AHP", "ATH", "ATN", "APT", "Other"].map((biz) => {
+                            {[...new Set(["ALL", "AHN", "AHP", "ATH", "ATN", "APT", "OTHER", ...Object.keys(dynamicReportStats.finalTotals)])].map((biz) => {
                               const isAll = biz === "ALL";
-                              const targetBUs = ["AHN", "AHP", "ATH", "ATN", "APT", "Other"];
                               const sheet1Val = isAll
-                                ? targetBUs.reduce((sum, business) => sum + (dynamicReportStats.sheet1Totals[business] || 0), 0)
+                                ? calculationSummary.sheet1Total
                                 : (dynamicReportStats.sheet1Totals[biz] || 0);
                               const hasAdjustments = isAll
                                 ? (dynamicReportStats.holdAddItems || []).length > 0
@@ -2111,10 +2107,9 @@ export function BulkPayment({
                       {(() => {
                         const biz = selectedBUGroup;
                         const isAll = biz === "ALL";
-                        const targetBUs = ["AHN", "AHP", "ATH", "ATN", "APT", "Other"];
 
                         const sheet1Val = isAll
-                          ? targetBUs.reduce((sum, b) => sum + (dynamicReportStats.sheet1Totals[b] || 0), 0)
+                          ? calculationSummary.sheet1Total
                           : (dynamicReportStats.sheet1Totals[biz] || 0);
 
                         const holdAddItems = isAll
@@ -2140,15 +2135,8 @@ export function BulkPayment({
                         // CANCEL is displayed in the breakdown but excluded from DEDUCTIONS and NET PAY calculation
                         const deductionsSum = holdAddItems.reduce((sum, item) => sum + item.contribution, 0);
 
-                        const finalTotal = isAll
-                          ? targetBUs.reduce((sum, b) => {
-                              const s1 = dynamicReportStats.sheet1Totals[b] || 0;
-                              const items = (dynamicReportStats.holdAddItems || []).filter((i) => i.biz === b);
-                              const h = items.filter((i) => i.type === "HOLD").reduce((acc, i) => acc + i.amount, 0);
-                              const a = items.filter((i) => i.type === "ADD").reduce((acc, i) => acc + i.amount, 0);
-                              return sum + (dynamicReportStats.finalTotals[b] ?? (s1 + h + a));
-                            }, 0)
-                          : (dynamicReportStats.finalTotals[biz] ?? (sheet1Val + deductionsSum));
+                        const finalTotal = sheet1Val + deductionsSum;
+                        const grossPayAvailable = Object.keys(dynamicReportStats.sheet1Totals).length > 0;
 
                         return (
                           <div className="bu-amount-card bu-payroll-ribbon-card relative overflow-hidden rounded-2xl border p-3.5 shadow-sm transition-all">
@@ -2170,8 +2158,8 @@ export function BulkPayment({
                                   <PayrollBowIcon className="bu-payroll-row-bow" />
                                   GROSS PAY
                                 </span>
-                                <span className="bu-summary-value text-foreground">
-                                  {formatMoneyVND(sheet1Val).replace(" ₫", "")}
+                                <span className="bu-summary-value text-foreground" title={grossPayAvailable ? undefined : "Chưa có Gross Pay của tháng đang chọn"}>
+                                  {grossPayAvailable ? formatMoneyVND(sheet1Val).replace(" ₫", "") : "—"}
                                 </span>
                               </div>
 
@@ -2243,7 +2231,7 @@ export function BulkPayment({
                                 NET PAY
                               </span>
                               <span className="bu-payroll-net-value">
-                                {formatMoneyVND(finalTotal).replace(" ₫", "")}
+                                {grossPayAvailable ? formatMoneyVND(finalTotal).replace(" ₫", "") : "—"}
                               </span>
                             </div>
                           </div>
@@ -3146,7 +3134,7 @@ export function BulkPayment({
                   id="btn-toolbar-transaction-save"
                   onClick={() => window.dispatchEvent(new Event("trigger-transaction-save"))}
                   className="px-2.5 py-1 text-xs font-semibold rounded-full border border-primary/20 bg-primary/5 hover:bg-primary/10 text-foreground transition-all cursor-pointer active:scale-[0.98] shadow-2xs whitespace-nowrap"
-                  title="Lưu Batch Payment đã bấm Lưu sửa lên Supabase, thay dữ liệu đúng tháng đang chọn"
+                  title="Lưu Batch Payment và Gross Pay của tháng đang chọn lên Supabase"
                 >
                   Lưu tháng
                 </button>
@@ -3281,6 +3269,7 @@ export function BulkPayment({
         <div hidden={rightPanelTab === "visuals"}>
           <TransactionHistoryPanel
             hasPendingEdits={hasPendingTransactionEdits}
+            grossPay={grossPay}
             masterUpdatePending={masterUpdatePending}
             syncRevision={appData.TransactionActivity?.saveVersion || 0}
             rows={masterDraft || appData.BankExport?.data?.length ? appData.BankExport.data : appData.Bank_North_AE?.data || []}

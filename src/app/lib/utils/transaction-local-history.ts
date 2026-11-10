@@ -1,11 +1,14 @@
-import type { AppData } from '../../types';
+import type { AppData, TableData } from '../../types';
 import type { TransactionCheckSource, TransactionVersion } from '../transaction-history-store';
 import { markTransactionSaved } from './transaction-activity';
 import { normalizePeriod, selectPeriodRows, type TransactionRow } from './transaction-history';
 import { replaceTransactionPeriod, sameTransactionSnapshot } from './transaction-snapshot';
 import { withTransactionMonthOriginal } from './transaction-originals';
+import { grossPayTableForMonth, restoreGrossPayMonth, saveGrossPayMonth } from './gross-pay-snapshot';
+import { calculateReconciliationTotals } from './reconciliation-sync';
 
 export type LocalTransactionMonths = NonNullable<AppData['TransactionMonthCache']>['months'];
+export type GrossPayHistoryAction = {type: 'save'; table?: TableData} | {type: 'restore'};
 
 /** A cloud-only check must not silently contradict a retained, saved Batch Payment. */
 export function conflictingLocalTransactionPeriods(
@@ -35,6 +38,7 @@ export function applyLocalTransactionVersions(
   appData: AppData,
   versions: TransactionVersion[],
   savedAt = new Date().toISOString(),
+  grossPay?: GrossPayHistoryAction,
 ): AppData {
   if (!versions.length) return appData;
   const activePeriod = normalizePeriod(appData.globalMonth);
@@ -64,7 +68,7 @@ export function applyLocalTransactionVersions(
       activity = nextActivity;
     }
   }
-  return {
+  let next: AppData = {
     ...appData,
     TableOriginals: originals.TableOriginals,
     BankExport: table,
@@ -72,4 +76,19 @@ export function applyLocalTransactionVersions(
     TransactionHistoryRestoreDisabled: false,
     TransactionMonthCache: {...appData.TransactionMonthCache, activePeriod, months, cloudMonths},
   };
+  if (grossPay && versions.some(version => version.period.slice(0, 7) === activePeriod)) {
+    const [year, month] = activePeriod.split('-');
+    const reportMonth = `${month}.${year}`;
+    if (grossPay.type === 'save') {
+      next = saveGrossPayMonth(next, reportMonth, grossPay.table);
+    } else if (!appData.TransactionMonthCache?.months[activePeriod]?.masterDraft &&
+      (next.SavedGrossPayByMonth?.[reportMonth] || !grossPayTableForMonth(next.Sheet1_AE, reportMonth))) {
+      next = restoreGrossPayMonth(next, reportMonth);
+    }
+    next.ReconciliationByMonth = {
+      ...next.ReconciliationByMonth,
+      [reportMonth]: {...calculateReconciliationTotals(next, reportMonth), generatedAt: savedAt},
+    };
+  }
+  return next;
 }
