@@ -57,6 +57,7 @@ test("Batch Payment clears drilldown searches and column filters without resetti
           SavedRows_HoldAdd: {[period]: [
             {id: 'base', bu: 'AHN', month: period, reportMonth: period, thu: 777, chi: 0},
             {id: 'detail_hold', bu: 'AHN', month: period, reportMonth: period, customMonthDisplay: 'Hold lương tháng 05.2026', thu: 0, chi: 100, rawHold: 100},
+            {id: 'base_ahp', bu: 'AHP', month: period, reportMonth: period, thu: 40, chi: 0},
           ]},
         });
         const summaryHtml = render();
@@ -126,7 +127,15 @@ test("Batch Payment clears drilldown searches and column filters without resetti
   assert.deepEqual(actual.afterCorrection, {query: "", clears: 2, month: "05.2026", rows: 2, originalId: "FIXED-ID"});
   assert.match(actual.summaryHtml, /GROSS PAY<\/span><span[^>]*>1\.250<\/span>/);
   assert.match(actual.summaryHtml, /NET PAY<\/span><span[^>]*>1\.150<\/span>/);
-  assert.match(actual.balanceHtml, /Tổng phát sinh CP Intern[\s\S]*?>1\.200<\/td>[\s\S]*?<\/tr><tr[^>]*data-trial-detail="true"[^>]*><td[^>]*>1\.1<\/td>/);
+  const detailRows = [...actual.balanceHtml.matchAll(/<tr\b[^>]*data-trial-detail="true"[^>]*>([\s\S]*?)<\/tr>/g)]
+    .map(([, row]) => [...row.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)]
+      .map(([, cell]) => cell.replace(/<[^>]*>/g, "")));
+  assert.deepEqual(detailRows, [
+    ["1.1", "↳Chi phí lương tháng 05.2026", "AHN", "0", "1.200", "0", "1.200", "0", ""],
+    ["1.2", "↳Hold lương tháng 05.2026", "AHN", "0", "0", "100", "0", "100", ""],
+    ["2.1", "↳Chi phí lương tháng 05.2026", "AHP", "0", "50", "0", "50", "0", ""],
+  ]);
+  assert.match(actual.balanceHtml.replaceAll("<!-- -->", ""), /TỔNG BU - AHN<\/td><td[^>]*>0<\/td><td[^>]*>777<\/td>/);
 });
 
 test("BulkPayment renders adjustment totals for HOLD, ADD, CANCEL and bonus rows", async () => {

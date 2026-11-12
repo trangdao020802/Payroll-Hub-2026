@@ -330,6 +330,32 @@ interface BuRow {
   isPaidStatus?: boolean;
 }
 
+type TrialBalanceDisplayRow = Pick<BuRow, "id" | "month" | "bu" | "thu" | "chi"> & Partial<BuRow> & {
+  grossPayStatus?: "available" | "missing";
+};
+
+function withPayrollCostDetail(
+  rows: BuRow[],
+  reportMonth: string,
+  bu: string,
+  grossPayByMonth: ReadonlyMap<string, ReadonlyMap<string, number>>,
+): TrialBalanceDisplayRow[] {
+  const period = parsePayrollMonth(reportMonth)?.dot;
+  const totals = period ? grossPayByMonth.get(period) : undefined;
+  const payrollCost: TrialBalanceDisplayRow = {
+    id: `gross-pay-${reportMonth}-${bu}`,
+    month: reportMonth,
+    bu,
+    customMonthDisplay: `Chi phí lương ${period ? `tháng ${period}` : reportMonth}`,
+    thu: totals?.get(normalizeGrossPayBusiness(bu)) ?? 0,
+    chi: 0,
+    grossPayStatus: totals ? "available" : "missing",
+  };
+  const firstDetail = rows.findIndex(row => Boolean(row.customMonthDisplay));
+  const insertAt = firstDetail < 0 ? rows.length : firstDetail;
+  return [...rows.slice(0, insertAt), payrollCost, ...rows.slice(insertAt)];
+}
+
 export function HoldAddDashboard() {
   const uiSettings = useUiSettings();
   const { appData, updateAppData } = useAppData();
@@ -2091,7 +2117,7 @@ export function HoldAddDashboard() {
         const hasDetailOpenHold = buRowsForExport.some(r => !!r.customMonthDisplay && (r.openHold || 0) > 0);
         const hasDetailHoldOrOpen = buRowsForExport.some(r => !!r.customMonthDisplay);
 
-        return buRowsForExport.map(row => {
+        return withPayrollCostDetail(buRowsForExport, mk, bu, grossPayByMonth).map(row => {
           const isDetail = !!row.customMonthDisplay;
           const buBalInfo = buBalancesByMonth[mk]?.[bu];
           const rowOpenBal = isDetail ? (row.openHold || 0) : (hasDetailOpenHold ? 0 : (buBalInfo?.openBal || 0));
@@ -2115,14 +2141,15 @@ export function HoldAddDashboard() {
                   : Math.max(0, (row.openHold || 0) - (row.thu || 0) - (row.rawCancel || row.cancel || 0)))
               : (hasDetailHoldOrOpen ? 0 : (remainingHoldByMonth[mk]?.byBu[bu] || 0));
 
+          const payrollAmount = row.grossPayStatus === "missing" ? "—" : row.thu || 0;
           return {
             "#": isDetail ? `${buIndex + 1}.${++detailIndex}` : String(buIndex + 1),
             "Ngày / Tháng": trialBalanceRowLabel(row),
             "Business": bu,
             "Số dư Hold ĐK": rowOpenBal,
-            "Lương TA của tháng": row.thu || 0,
+            "Lương TA của tháng": payrollAmount,
             "Lương Hold của tháng": Math.abs(row.chi || 0),
-            "Tổng PS tại kỳ": isDetail ? (row.thu || 0) : (rowRCloseBalances[row.id] ?? 0),
+            "Tổng PS tại kỳ": isDetail ? payrollAmount : (rowRCloseBalances[row.id] ?? 0),
             "Số dư Hold còn lại": rowRemainingHold,
             "Note": row.ghiChu || "",
           };
@@ -2177,6 +2204,7 @@ export function HoldAddDashboard() {
     currentPeriodRows,
     currentPeriodVal,
     grandAddPillValue,
+    grossPayByMonth,
     holdPillValue,
     rowRCloseBalances,
   ]);
@@ -2545,9 +2573,11 @@ export function HoldAddDashboard() {
                             const hasDetailOpenHold = buRows.some(r => !!r.customMonthDisplay && (r.openHold || 0) > 0);
                             const hasDetailHoldOrOpen = buRows.some(r => !!r.customMonthDisplay);
 
-                            const renderedBuRows = buRows.map((e) => {
+                            const displayRows = withPayrollCostDetail(buRows, mk, bu, grossPayByMonth);
+                            const renderedBuRows = displayRows.map((e) => {
                               const isDetail = !!e.customMonthDisplay;
                               const rowNumber = isDetail ? `${mainNumber}.${++detailIndex}` : String(mainNumber);
+                              const rowLabel = trialBalanceRowLabel(e);
                               const buBalInfo = buBalancesByMonth[mk]?.[e.bu];
                               const rowOpenBal = isDetail ? (e.openHold || 0) : (hasDetailOpenHold ? 0 : (buBalInfo?.openBal || 0));
                               
@@ -2564,6 +2594,7 @@ export function HoldAddDashboard() {
                                 (!!(e.rawHold || e.hold) || /_hold\b/i.test(e.id) || /\bhold\b/i.test(e.customMonthDisplay || ""));
                               const displayedThu = e.thu;
                               const displayedChi = Math.abs(e.chi);
+                              const payrollCostMissing = e.grossPayStatus === "missing";
                               const rowRemainingHold = isCancel
                                 ? 0
                                 : isDetail
@@ -2576,8 +2607,10 @@ export function HoldAddDashboard() {
                                 !!e._dimmed && isPeriodSaved(e.month);
                               const displayedRCloseStr = rClose !== 0 ? fmt(rClose) : "0";
                               
-                              sumThu += isRowDimmed ? 0 : displayedThu;
-                              sumChi += isRowDimmed ? 0 : displayedChi;
+                              if (!e.grossPayStatus && !isRowDimmed) {
+                                sumThu += displayedThu;
+                                sumChi += displayedChi;
+                              }
 
                               return (
                                 <tr
@@ -2604,15 +2637,15 @@ export function HoldAddDashboard() {
                                         ? "px-3 py-2 text-left whitespace-nowrap min-w-[120px] text-[12.5px] font-bold text-slate-900 dark:text-slate-50 tracking-tight"
                                         : "px-3 py-2 text-left whitespace-nowrap min-w-[120px] text-[12px] text-slate-600 dark:text-slate-300 font-normal pl-5"
                                     }`}
-                                    title={trialBalanceRowLabel(e)}
+                                    title={rowLabel}
                                   >
                                     {isDetail ? (
                                       <span className="inline-flex items-center gap-1.5">
                                         <span className="text-slate-400 dark:text-slate-500 text-[10px] font-mono select-none">↳</span>
-                                        <span>{trialBalanceRowLabel(e)}</span>
+                                        <span>{rowLabel}</span>
                                       </span>
                                     ) : (
-                                      trialBalanceRowLabel(e)
+                                      rowLabel
                                     )}
                                   </td>
                                   <td
@@ -2649,13 +2682,13 @@ export function HoldAddDashboard() {
                                   <td
                                     className="border-r border-b border-[#dfd0d6] dark:border-slate-800 p-2 text-right tabular-nums text-xs whitespace-nowrap min-w-[80px]"
                                   >
-                                    {!isRowDimmed && displayedThu !== 0 ? (
+                                    {!isRowDimmed && (displayedThu !== 0 || payrollCostMissing) ? (
                                       <span
                                         className={`${
                                           !isDetail ? "text-slate-900 dark:text-slate-100 font-semibold text-[12px]" : "text-slate-600 dark:text-slate-400 font-normal text-[12px]"
                                         }`}
                                       >
-                                        {fmt(displayedThu)}
+                                        {payrollCostMissing ? "—" : fmt(displayedThu)}
                                       </span>
                                     ) : (
                                       "0"
@@ -2684,7 +2717,7 @@ export function HoldAddDashboard() {
                                         !isDetail ? "text-rose-600 dark:text-rose-400 font-bold text-[12px]" : "text-rose-600/80 dark:text-rose-400/80 font-medium text-[12px]"
                                       }`}
                                     >
-                                      {isDetail ? fmt(displayedThu) : displayedRCloseStr}
+                                      {payrollCostMissing ? "—" : isDetail ? fmt(displayedThu) : displayedRCloseStr}
                                     </span>
                                   </td>
                                   <td
@@ -2740,24 +2773,7 @@ export function HoldAddDashboard() {
                               </tr>
                             );
                             
-                            const firstDetail = buRows.findIndex(row => Boolean(row.customMonthDisplay));
-                            const insertAt = firstDetail < 0 ? renderedBuRows.length : firstDetail;
-                            const grossTotals = grossPayByMonth.get(parsePayrollMonth(mk)?.dot || "");
-                            const grossPayRow = (
-                              <tr key={`gross-pay-${mk}-${bu}`} className="bg-primary/5 font-bold text-foreground">
-                                <td className="border-b border-border" />
-                                <th scope="row" className="border-b border-border px-3 py-2 text-left text-xs whitespace-nowrap">
-                                  Tổng phát sinh CP Intern
-                                </th>
-                                <td className="border-b border-border p-2 text-center text-xs">{bu}</td>
-                                <td colSpan={3} className="border-b border-border" />
-                                <td className="border-b border-border p-2 text-right tabular-nums text-xs whitespace-nowrap">
-                                  {grossTotals ? fmt(grossTotals.get(normalizeGrossPayBusiness(bu)) || 0) : "—"}
-                                </td>
-                                <td colSpan={2} className="border-b border-border" />
-                              </tr>
-                            );
-                            return [...renderedBuRows.slice(0, insertAt), grossPayRow, ...renderedBuRows.slice(insertAt), subtotalRow];
+                            return [...renderedBuRows, subtotalRow];
                           });
                         })()
                       : []),
