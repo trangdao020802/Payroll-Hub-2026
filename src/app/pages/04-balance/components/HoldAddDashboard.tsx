@@ -332,6 +332,7 @@ interface BuRow {
 
 type TrialBalanceDisplayRow = Pick<BuRow, "id" | "month" | "bu" | "thu" | "chi"> & Partial<BuRow> & {
   grossPayStatus?: "available" | "missing";
+  periodBalance: number | null;
 };
 
 function withPayrollCostDetail(
@@ -339,21 +340,32 @@ function withPayrollCostDetail(
   reportMonth: string,
   bu: string,
   grossPayByMonth: ReadonlyMap<string, ReadonlyMap<string, number>>,
+  rowNetAmounts: ReadonlyMap<BuRow, number>,
 ): TrialBalanceDisplayRow[] {
   const period = parsePayrollMonth(reportMonth)?.dot;
   const totals = period ? grossPayByMonth.get(period) : undefined;
+  const grossPay = totals?.get(normalizeGrossPayBusiness(bu)) ?? 0;
+  let periodBalance = totals ? grossPay : null;
   const payrollCost: TrialBalanceDisplayRow = {
     id: `gross-pay-${reportMonth}-${bu}`,
     month: reportMonth,
     bu,
     customMonthDisplay: `Chi phí lương ${period ? `tháng ${period}` : reportMonth}`,
-    thu: totals?.get(normalizeGrossPayBusiness(bu)) ?? 0,
+    thu: grossPay,
     chi: 0,
     grossPayStatus: totals ? "available" : "missing",
+    periodBalance,
   };
   const firstDetail = rows.findIndex(row => Boolean(row.customMonthDisplay));
   const insertAt = firstDetail < 0 ? rows.length : firstDetail;
-  return [...rows.slice(0, insertAt), payrollCost, ...rows.slice(insertAt)];
+  const summaryRows = rows.slice(0, insertAt).map(row => ({ ...row, periodBalance: rowNetAmounts.get(row) ?? 0 }));
+  const detailRows = rows.slice(insertAt).map(row => {
+    if (periodBalance !== null && !row._excludeFromTotals) {
+      periodBalance += rowNetAmounts.get(row) ?? 0;
+    }
+    return { ...row, periodBalance };
+  });
+  return [...summaryRows, payrollCost, ...detailRows];
 }
 
 export function HoldAddDashboard() {
@@ -1980,7 +1992,7 @@ export function HoldAddDashboard() {
     grandChi,
     grandBal,
     filteredData,
-    rowRCloseBalances,
+    rowNetAmounts,
     monthCloseBalances,
   } = useMemo(() => {
     let open = 0;
@@ -2002,7 +2014,7 @@ export function HoldAddDashboard() {
       }
     });
 
-    const rowRCloseBalances: Record<string, number> = {};
+    const rowNetAmounts = new Map<BuRow, number>();
     const buCloseBalances: Record<string, number> = {};
     const monthCloseBalances: Record<string, number> = {};
 
@@ -2025,9 +2037,9 @@ export function HoldAddDashboard() {
             adjustedDisplayedChi = 0; // Exclude past holds/cancels from SDCK calculation
           }
 
-          // SDCK = Lương TA của tháng - Lương Hold của tháng (standalone per row, KHÔNG CỘNG DÒNG BÊN TRÊN NỮA)
+          // This is the movement of this row. Detail balances accumulate it from Gross Pay.
           const rowCloseBal = displayedThu - adjustedDisplayedChi;
-          rowRCloseBalances[e.id] = rowCloseBal;
+          rowNetAmounts.set(e, rowCloseBal);
 
           buCloseBalSum += rowCloseBal;
         });
@@ -2060,7 +2072,7 @@ export function HoldAddDashboard() {
       grandCancel: cancel,
       grandBal,
       filteredData: filtered,
-      rowRCloseBalances,
+      rowNetAmounts,
       buCloseBalances,
       monthCloseBalances,
     };
@@ -2117,7 +2129,7 @@ export function HoldAddDashboard() {
         const hasDetailOpenHold = buRowsForExport.some(r => !!r.customMonthDisplay && (r.openHold || 0) > 0);
         const hasDetailHoldOrOpen = buRowsForExport.some(r => !!r.customMonthDisplay);
 
-        return withPayrollCostDetail(buRowsForExport, mk, bu, grossPayByMonth).map(row => {
+        return withPayrollCostDetail(buRowsForExport, mk, bu, grossPayByMonth, rowNetAmounts).map(row => {
           const isDetail = !!row.customMonthDisplay;
           const buBalInfo = buBalancesByMonth[mk]?.[bu];
           const rowOpenBal = isDetail ? (row.openHold || 0) : (hasDetailOpenHold ? 0 : (buBalInfo?.openBal || 0));
@@ -2149,7 +2161,7 @@ export function HoldAddDashboard() {
             "Số dư Hold ĐK": rowOpenBal,
             "Lương TA của tháng": payrollAmount,
             "Lương Hold của tháng": Math.abs(row.chi || 0),
-            "Tổng PS tại kỳ": isDetail ? payrollAmount : (rowRCloseBalances[row.id] ?? 0),
+            "Tổng PS tại kỳ": row.periodBalance ?? "—",
             "Số dư Hold còn lại": rowRemainingHold,
             "Note": row.ghiChu || "",
           };
@@ -2206,7 +2218,7 @@ export function HoldAddDashboard() {
     grandAddPillValue,
     grossPayByMonth,
     holdPillValue,
-    rowRCloseBalances,
+    rowNetAmounts,
   ]);
 
   return (
@@ -2573,7 +2585,7 @@ export function HoldAddDashboard() {
                             const hasDetailOpenHold = buRows.some(r => !!r.customMonthDisplay && (r.openHold || 0) > 0);
                             const hasDetailHoldOrOpen = buRows.some(r => !!r.customMonthDisplay);
 
-                            const displayRows = withPayrollCostDetail(buRows, mk, bu, grossPayByMonth);
+                            const displayRows = withPayrollCostDetail(buRows, mk, bu, grossPayByMonth, rowNetAmounts);
                             const renderedBuRows = displayRows.map((e) => {
                               const isDetail = !!e.customMonthDisplay;
                               const rowNumber = isDetail ? `${mainNumber}.${++detailIndex}` : String(mainNumber);
@@ -2602,10 +2614,8 @@ export function HoldAddDashboard() {
                                       ? (displayedChi || e.rawHold || e.hold || 0)
                                       : Math.max(0, (e.openHold || 0) - displayedThu - (e.rawCancel || e.cancel || 0)))
                                   : (hasDetailHoldOrOpen ? 0 : (remainingHoldByMonth[mk]?.byBu[bu] || 0));
-                              const rClose = rowRCloseBalances[e.id] ?? 0;
                               const isRowDimmed =
                                 !!e._dimmed && isPeriodSaved(e.month);
-                              const displayedRCloseStr = rClose !== 0 ? fmt(rClose) : "0";
                               
                               if (!e.grossPayStatus && !isRowDimmed) {
                                 sumThu += displayedThu;
@@ -2717,7 +2727,7 @@ export function HoldAddDashboard() {
                                         !isDetail ? "text-rose-600 dark:text-rose-400 font-bold text-[12px]" : "text-rose-600/80 dark:text-rose-400/80 font-medium text-[12px]"
                                       }`}
                                     >
-                                      {payrollCostMissing ? "—" : isDetail ? fmt(displayedThu) : displayedRCloseStr}
+                                      {e.periodBalance === null ? "—" : fmt(e.periodBalance)}
                                     </span>
                                   </td>
                                   <td
@@ -2743,9 +2753,9 @@ export function HoldAddDashboard() {
                               );
                             });
                             
-                            // Sum the displayed closing values, which already normalize HOLD signs.
+                            // Each underlying movement contributes once to the subtotal.
                             const finalCloseBal = buRows.reduce(
-                              (sum, row) => sum + (rowRCloseBalances[row.id] ?? 0), 0,
+                              (sum, row) => sum + (rowNetAmounts.get(row) ?? 0), 0,
                             );
 
                             const subtotalRow = (

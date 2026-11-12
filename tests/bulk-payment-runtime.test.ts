@@ -56,7 +56,9 @@ test("Batch Payment clears drilldown searches and column filters without resetti
           SavedPeriods_HoldAdd: {[period]: true},
           SavedRows_HoldAdd: {[period]: [
             {id: 'base', bu: 'AHN', month: period, reportMonth: period, thu: 777, chi: 0},
+            {id: 'opening_hold', bu: 'AHN', month: period, reportMonth: period, displayMonth: 'Tháng 3/2026', customMonthDisplay: 'Hold lương tháng 03.2026', thu: 0, chi: 0, openHold: 80, _isOpeningHold: true},
             {id: 'detail_hold', bu: 'AHN', month: period, reportMonth: period, customMonthDisplay: 'Hold lương tháng 05.2026', thu: 0, chi: 100, rawHold: 100},
+            {id: 'detail_add', bu: 'AHN', month: period, reportMonth: period, displayMonth: 'Tháng 4/2026', customMonthDisplay: 'Add lương tháng 04.2026', thu: 30, chi: 0, openHold: 50, rawAdd: 30},
             {id: 'base_ahp', bu: 'AHP', month: period, reportMonth: period, thu: 40, chi: 0},
           ]},
         });
@@ -132,10 +134,12 @@ test("Batch Payment clears drilldown searches and column filters without resetti
       .map(([, cell]) => cell.replace(/<[^>]*>/g, "")));
   assert.deepEqual(detailRows, [
     ["1.1", "↳Chi phí lương tháng 05.2026", "AHN", "0", "1.200", "0", "1.200", "0", ""],
-    ["1.2", "↳Hold lương tháng 05.2026", "AHN", "0", "0", "100", "0", "100", ""],
+    ["1.2", "↳Hold lương tháng 03.2026", "AHN", "80", "0", "0", "1.200", "80", ""],
+    ["1.3", "↳Hold lương tháng 05.2026", "AHN", "0", "0", "100", "1.100", "100", ""],
+    ["1.4", "↳+ Add lương tháng 04.2026", "AHN", "50", "30", "0", "1.130", "20", ""],
     ["2.1", "↳Chi phí lương tháng 05.2026", "AHP", "0", "50", "0", "50", "0", ""],
   ]);
-  assert.match(actual.balanceHtml.replaceAll("<!-- -->", ""), /TỔNG BU - AHN<\/td><td[^>]*>0<\/td><td[^>]*>777<\/td>/);
+  assert.match(actual.balanceHtml.replaceAll("<!-- -->", ""), /TỔNG BU - AHN<\/td><td[^>]*>80<\/td><td[^>]*>807<\/td>/);
 });
 
 test("BulkPayment renders adjustment totals for HOLD, ADD, CANCEL and bonus rows", async () => {
